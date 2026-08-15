@@ -1,11 +1,25 @@
 # Roadmap
 
-1. Fundação local e observável.
-2. Perfil, habilidades, experiências, preferências e currículos.
-3. Normalização, deduplicação, matching explicável e bloqueios.
-4. InfoJobs com Playwright visual em coleta; depois candidatura assistida.
-5. Dashboard em tempo real, histórico e relatórios.
-6. Hardening, testes E2E mockados e operação diária.
+## Entregue
 
-Indeed, Catho, LinkedIn, e-mail e calendário não fazem parte do primeiro corte.
+- Fundação monorepo, Docker, API, worker e observabilidade.
+- Perfil profissional e currículo.
+- Chrome persistente e Playwright assistido.
+- Busca, análise, score, fila e feedback de candidaturas.
+- IA local para respostas fundamentadas.
+- Gmail, classificação de recrutamento e rascunhos.
+- Google Calendar com deduplicação.
+- Validação de questionários e bloqueio de rastreadores.
+- Painel responsivo acessível na rede local.
 
+## Próximas evoluções
+
+1. Testes E2E com páginas simuladas para cada layout.
+2. Persistir domínio completo no PostgreSQL, mantendo migração do runtime JSON.
+3. Autenticação local e HTTPS para acesso por celular.
+4. Alertas push/PWA e resumo diário.
+5. Métricas de conversão por fonte, cargo, região e currículo.
+6. Versionamento de seletores e replay seguro de impedimentos.
+7. Criptografia e política configurável de retenção local.
+
+Plataformas externas mudam frequentemente; evolução de conectores deve permanecer isolada, auditável e reversível.
