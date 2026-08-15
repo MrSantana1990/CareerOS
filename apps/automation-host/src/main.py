@@ -1,0 +1,1228 @@
+import asyncio
+import json
+import logging
+import os
+import re
+import subprocess
+import shutil
+import uuid
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+from datetime import UTC, datetime
+from pathlib import Path
+from urllib.parse import quote_plus, urljoin, urlparse
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
+from pydantic import BaseModel, Field
+from pypdf import PdfReader
+from .google_career import connection_status, create_calendar_event, create_reply_draft, mark_questionnaire_complete, scan_recruitment_mail
+
+ROOT = Path(__file__).resolve().parents[3]
+RUNTIME = ROOT / ".runtime"
+PROFILE = RUNTIME / "browser-profiles" / "default"
+RESULTS = RUNTIME / "jobs.json"
+LOGS = RUNTIME / "automation-events.jsonl"
+PROFILE_DATA = RUNTIME / "professional-profile.json"
+APPLICATIONS = RUNTIME / "applications.json"
+RESUMES = RUNTIME / "resumes"
+SCREENSHOTS = RUNTIME / "screenshots"
+SETTINGS_DATA = RUNTIME / "automation-settings.json"
+LAYOUT_KNOWLEDGE = RUNTIME / "layout-knowledge.json"
+AI_DECISIONS = RUNTIME / "ai-decisions.jsonl"
+GOOGLE_TOKEN = RUNTIME / "google" / "google-token.json"
+GOOGLE_INBOX = RUNTIME / "google" / "career-mail.json"
+GOOGLE_STATUS_CACHE = RUNTIME / "google" / "connection-status.json"
+LOCAL_AI_URL = os.getenv("LOCAL_AI_URL", "http://127.0.0.1:8080/v1")
+
+PLATFORMS = {
+    "InfoJobs": "https://www.infojobs.com.br/",
+    "Indeed": "https://br.indeed.com/",
+    "Catho": "https://www.catho.com.br/vagas/",
+    "LinkedIn": "https://www.linkedin.com/jobs/",
+}
+
+app = FastAPI(title="CareerOS Automation Host", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origin_regex=r"http://(?:192\.168|10|172\.(?:1[6-9]|2\d|3[01]))(?:\.\d{1,3}){2}:3000",
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
+
+playwright: Playwright | None = None
+context: BrowserContext | None = None
+run_task: asyncio.Task | None = None
+state: dict[str, object] = {
+    "status": "offline", "platform": None, "role": None, "found": 0,
+    "blocked": 0, "message": "Agente ainda não inicializado.", "updated_at": None,
+}
+
+
+class RunRequest(BaseModel):
+    roles: list[str] = Field(min_length=1, max_length=20)
+    max_roles: int = Field(default=3, ge=1, le=10)
+
+
+class ProfessionalProfile(BaseModel):
+    full_name: str = ""
+    email: str = ""
+    phone: str = ""
+    city: str = "Campinas"
+    state: str = "SP"
+    linkedin_url: str = ""
+    salary_expectation: str = ""
+    work_models: list[str] = ["REMOTE", "HYBRID"]
+    target_roles: list[str] = [
+        "Analista de Sustentação",
+        "Analista de Suporte N3",
+        "Analista de Sistemas",
+    ]
+    skills: list[str] = []
+    approved_answers: dict[str, str] = {}
+    resume_path: str = ""
+
+
+class AnalyzeRequest(BaseModel):
+    minimum_score: int = Field(default=75, ge=0, le=100)
+    limit: int = Field(default=250, ge=1, le=1000)
+
+
+class PrepareRequest(BaseModel):
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class AutomationSettings(BaseModel):
+    auto_apply_enabled: bool = False
+    minimum_score: int = Field(default=75, ge=0, le=100)
+    daily_target: int = Field(default=20, ge=1, le=50)
+    require_complete_profile: bool = True
+    preferred_locations: list[str] = ["Campinas e região", "São Paulo - SP", "Portugal"]
+    support_salary_campinas: int = Field(default=4000, ge=0)
+    support_salary_sao_paulo: int = Field(default=7000, ge=0)
+    salary_is_soft_preference: bool = True
+
+
+class ExecuteRequest(BaseModel):
+    limit: int = Field(default=20, ge=1, le=50)
+    confirm_live_submission: bool = False
+    application_ids: list[str] = []
+
+
+class BootstrapRequest(BaseModel):
+    resume_path: str
+
+
+class AIAdviceRequest(BaseModel):
+    question: str = Field(min_length=2, max_length=4000)
+    job_title: str = Field(default="", max_length=500)
+    job_description: str = Field(default="", max_length=12000)
+
+
+class GoogleDraftRequest(BaseModel):
+    message_id: str = Field(min_length=5, max_length=200)
+
+
+SKILL_CATALOG = [
+    "SQL Server", "PostgreSQL", "Oracle", "MySQL", "PL/SQL", "T-SQL",
+    "Power BI", "Microsoft Fabric", "Databricks", "Azure", "AWS",
+    "Azure Data Factory", "AWS RDS", "AWS Aurora", "Java", "APIs REST",
+    "Git", "GitHub", "CI/CD", "Docker", "ETL", "Troubleshooting",
+    "Sustentação", "Suporte N2", "Suporte N3", "Suporte N4",
+    "Engenharia de Dados", "Modelagem de Dados", "Monitoramento",
+]
+
+TARGET_ROLES = [
+    "Analista de Sustentação", "Analista de Suporte N3", "Analista de Sistemas",
+    "Analista de Banco de Dados", "DBA SQL Server", "DBA Oracle",
+    "DBA PostgreSQL", "Analista de Dados", "Analista de BI",
+    "Engenheiro de Dados", "Application Support Analyst", "Production Support Analyst",
+]
+
+
+def event(message: str, **metadata: object) -> None:
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    entry = {"timestamp": datetime.now(UTC).isoformat(), "message": message, **metadata}
+    with LOGS.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def _http_json(url: str, payload: dict | None = None, timeout: int = 8) -> dict:
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload else None
+    request = Request(url, data=data, headers={"Content-Type": "application/json"})
+    with urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+async def local_ai_status() -> dict[str, object]:
+    try:
+        result = await asyncio.to_thread(_http_json, f"{LOCAL_AI_URL}/models", None, 3)
+        models = [item.get("id", "") for item in result.get("data", [])]
+        return {"available": True, "model": models[0] if models else "local", "privacy": "local-only"}
+    except Exception:
+        return {"available": False, "model": None, "privacy": "local-only"}
+
+
+async def local_ai_advice(request: AIAdviceRequest, profile: ProfessionalProfile) -> dict[str, object]:
+    system = (
+        "Você é o copiloto de candidaturas do CareerOS. Responda SOMENTE JSON válido. "
+        "Nunca invente experiência, formação, idioma, salário ou disponibilidade. "
+        "Use exclusivamente o perfil fornecido. Se faltar prova, action deve ser ASK_USER. "
+        "Formato: {\"action\":\"ANSWER|ASK_USER|SKIP_JOB\",\"answer\":\"\","
+        "\"confidence\":0.0,\"evidence\":[\"\"],\"reason\":\"\"}."
+    )
+    user = {"question": request.question, "job_title": request.job_title,
+            "job_description": request.job_description, "profile": profile.model_dump()}
+    payload = {"model": "local", "temperature": 0.1, "max_tokens": 500,
+               "messages": [{"role": "system", "content": system},
+                            {"role": "user", "content": json.dumps(user, ensure_ascii=False)}]}
+    result = await asyncio.to_thread(_http_json, f"{LOCAL_AI_URL}/chat/completions", payload, 60)
+    content = result["choices"][0]["message"]["content"].strip()
+    match = re.search(r"\{.*\}", content, re.DOTALL)
+    if not match:
+        raise ValueError("A IA local não retornou JSON válido.")
+    decision = json.loads(match.group(0))
+    if decision.get("action") == "ANSWER" and float(decision.get("confidence", 0)) < 0.85:
+        decision["action"] = "ASK_USER"
+        decision["answer"] = ""
+        decision["reason"] = "Confiança abaixo do limite seguro de 85%."
+    AI_DECISIONS.parent.mkdir(parents=True, exist_ok=True)
+    with AI_DECISIONS.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"at": datetime.now(UTC).isoformat(), "input": user, "decision": decision}, ensure_ascii=False) + "\n")
+    return decision
+
+
+def update(**values: object) -> None:
+    state.update(values)
+    state["updated_at"] = datetime.now(UTC).isoformat()
+
+
+def load_json(path: Path, default):
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return default
+
+
+def save_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def normalized_tokens(value: str) -> set[str]:
+    return {
+        token for token in re.findall(r"[a-z0-9+#.]{2,}", value.lower())
+        if token not in {"para", "com", "uma", "das", "dos", "and", "the"}
+    }
+
+
+def calculate_match(job: dict, profile: ProfessionalProfile) -> tuple[int, list[str], list[str]]:
+    title = str(job.get("title", ""))
+    role = str(job.get("search_role", ""))
+    haystack = normalized_tokens(f"{title} {role}")
+    skills = {skill.lower().strip() for skill in profile.skills if skill.strip()}
+    matched = sorted(skill for skill in skills if normalized_tokens(skill) & haystack)
+    role_tokens = normalized_tokens(role)
+    title_tokens = normalized_tokens(title)
+    role_overlap = len(role_tokens & title_tokens) / max(1, len(role_tokens))
+    technical = min(25, len(matched) * 8)
+    title_score = round(role_overlap * 55)
+    remote_score = 15 if any(word in title.lower() for word in ("remoto", "remote", "home office")) else 10
+    source_score = 12
+    geography = title.lower()
+    location_score = 18 if "campinas" in geography else 14 if re.search(r"são paulo|\bsp\b", geography) else 12 if re.search(r"portugal|lisboa|porto", geography) else 0
+    score = min(100, technical + title_score + remote_score + source_score + location_score)
+    positives = [f"Cargo relacionado a {role}."] if role_overlap else []
+    positives.extend(f"Competência relacionada: {skill}." for skill in matched[:5])
+    risks: list[str] = []
+    if not matched:
+        risks.append("Descrição resumida ainda não comprova competências técnicas.")
+    if "gupy" in str(job.get("url", "")).lower():
+        risks.append("Plataforma bloqueada pelo usuário.")
+        score = 0
+    return score, positives, risks
+
+
+def resume_text(profile: ProfessionalProfile, limit: int = 18000) -> str:
+    source = Path(profile.resume_path)
+    if not source.exists() or source.suffix.lower() != ".pdf":
+        return ""
+    try:
+        return "\n".join(page.extract_text() or "" for page in PdfReader(str(source)).pages)[:limit]
+    except Exception:
+        return ""
+
+
+def geography_priority(item: dict) -> int:
+    text = f"{item.get('title', '')} {item.get('job_url', item.get('url', ''))}".lower()
+    if "campinas" in text:
+        return 0
+    if re.search(r"são paulo|sao-paulo|\bsp\b", text):
+        return 1
+    if re.search(r"portugal|lisboa|porto", text):
+        return 2
+    if re.search(r"remoto|remote", text):
+        return 3
+    return 4
+
+
+def extract_salary_brl(text: str) -> int | None:
+    values: list[int] = []
+    for match in re.finditer(r"R\$\s*([\d.]+)(?:,\d{2})?", text, re.IGNORECASE):
+        raw = match.group(1).replace(".", "")
+        if raw.isdigit() and 1000 <= int(raw) <= 100000:
+            values.append(int(raw))
+    return min(values) if values else None
+
+
+def opportunity_feedback(title: str, body: str, settings: AutomationSettings) -> dict[str, object]:
+    text = f"{title} {body}".lower()
+    salary = extract_salary_brl(body)
+    is_support = bool(re.search(r"suporte|sustenta[cç][aã]o|service desk|help.?desk|n[1234]", text))
+    region = "Campinas" if re.search(r"campinas|hortol[aâ]ndia|sumar[eé]|valinhos|vinhedo|paul[ií]nia|indaiatuba", text) else "São Paulo" if re.search(r"s[aã]o paulo|barueri|osasco|alphaville|guarulhos|abc paulista", text) else "Portugal" if re.search(r"portugal|lisboa|porto", text) else "Outra"
+    target = settings.support_salary_campinas if region == "Campinas" else settings.support_salary_sao_paulo if region == "São Paulo" else None
+    if is_support and target and salary:
+        if salary >= target:
+            recommendation = "PRIORITY"
+            reason = f"Suporte em {region} com salário publicado de aproximadamente R$ {salary:,.0f}, alinhado à preferência flexível."
+        else:
+            recommendation = "REVIEW"
+            reason = f"Salário publicado de aproximadamente R$ {salary:,.0f}, abaixo da referência flexível de R$ {target:,.0f}; avaliar benefícios, modalidade e aderência."
+    elif is_support and target:
+        recommendation = "REVIEW"
+        reason = f"Vaga de suporte em {region} sem salário publicado; manter para análise, sem rejeição automática."
+    else:
+        recommendation = "STANDARD"
+        reason = "Avaliar aderência técnica, modalidade, benefícios e remuneração em conjunto."
+    return {"region": region, "salary_brl": salary, "recommendation": recommendation, "feedback": reason}
+
+
+def environment_auto_apply_enabled() -> bool:
+    env_file = ROOT / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            if line.strip().upper() == "AUTO_APPLY_ENABLED=TRUE":
+                return True
+    return os.getenv("AUTO_APPLY_ENABLED", "false").lower() == "true"
+
+
+def extract_resume_profile(source: Path) -> ProfessionalProfile:
+    if source.suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="A importação automática atual exige currículo PDF.")
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(source)).pages)
+    compact = re.sub(r"[ \t]+", " ", text)
+    email_match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", compact)
+    phone_match = re.search(r"(?:\+?55\s*)?(?:\(?\d{2}\)?\s*)?9?\d{4}[-\s]?\d{4}", compact)
+    linkedin_match = re.search(r"(?:https?://)?(?:www\.)?linkedin\.com/in/[\w%./-]+", compact, re.I)
+    name = ""
+    for line in text.splitlines():
+        candidate = line.strip()
+        if 2 <= len(candidate.split()) <= 6 and "rodolfo" in candidate.lower() and "santana" in candidate.lower():
+            name = candidate
+            break
+    lower = compact.lower()
+    skills = [skill for skill in SKILL_CATALOG if skill.lower() in lower]
+    city = "Campinas" if "campinas" in lower else ""
+    state = "SP" if re.search(r"\bsp\b|são paulo", lower) else ""
+    return ProfessionalProfile(
+        full_name=name or "Rodolfo Santana",
+        email=email_match.group(0) if email_match else "",
+        phone=phone_match.group(0) if phone_match else "",
+        city=city,
+        state=state,
+        linkedin_url=(
+            linkedin_match.group(0)
+            if linkedin_match and linkedin_match.group(0).startswith("http")
+            else f"https://{linkedin_match.group(0)}" if linkedin_match else ""
+        ),
+        work_models=["REMOTE", "HYBRID"],
+        target_roles=TARGET_ROLES,
+        skills=skills,
+        approved_answers={},
+    )
+
+
+async def ensure_browser() -> BrowserContext:
+    global playwright, context
+    if context:
+        return context
+    PROFILE.mkdir(parents=True, exist_ok=True)
+    playwright = await async_playwright().start()
+    context = await playwright.chromium.launch_persistent_context(
+        user_data_dir=str(PROFILE), channel="chrome", headless=False,
+        viewport={"width": 1440, "height": 900}, locale="pt-BR",
+        args=["--start-maximized"],
+    )
+    update(status="ready", message="Chrome exclusivo aberto e pronto.")
+    event("BROWSER_STARTED")
+    return context
+
+
+def search_url(platform: str, role: str, location: str = "") -> str:
+    query = quote_plus(role)
+    if platform == "InfoJobs":
+        slug = re.sub(r"[^a-z0-9]+", "-", role.lower()).strip("-")
+        return f"https://www.infojobs.com.br/vagas-de-emprego-{slug}.aspx"
+    if platform == "Indeed":
+        return f"https://br.indeed.com/jobs?q={query}&l={quote_plus(location or 'Brasil')}"
+    if platform == "Catho":
+        return f"https://www.catho.com.br/vagas/?q={query}"
+    return f"https://www.linkedin.com/jobs/search/?keywords={query}&location={quote_plus(location or 'Brasil')}"
+
+
+def looks_like_job(platform: str, url: str, text: str) -> bool:
+    value = f"{url} {text}".lower()
+    if "gupy.io" in value or "gupy" in urlparse(url).netloc.lower():
+        return False
+    patterns = {
+        "InfoJobs": ("/vaga-de-emprego-", "/vagas-de-emprego/"),
+        "Indeed": ("/viewjob", "jk="),
+        "Catho": ("/vaga/", "/vagas/"),
+        "LinkedIn": ("/jobs/view/",),
+    }
+    return len(text.strip()) >= 5 and any(part in url.lower() for part in patterns[platform])
+
+
+async def collect_page(page: Page, platform: str, role: str, location: str = "") -> tuple[list[dict], int]:
+    url = search_url(platform, role, location)
+    await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    await page.wait_for_timeout(3500)
+    anchors = await page.locator("a[href]").evaluate_all(
+        "els => els.map(a => ({href: a.href, text: (a.innerText || a.textContent || '').trim()}))"
+    )
+    jobs: list[dict] = []
+    blocked = 0
+    for anchor in anchors:
+        href = urljoin(url, anchor.get("href", ""))
+        text = re.sub(r"\s+", " ", anchor.get("text", "")).strip()[:300]
+        if "gupy.io" in href.lower():
+            blocked += 1
+            continue
+        if looks_like_job(platform, href, text):
+            jobs.append({
+                "source": platform, "title": text, "url": href, "search_role": role,
+                "location_search": location, "collected_at": datetime.now(UTC).isoformat(), "status": "DISCOVERED",
+            })
+    return jobs, blocked
+
+
+async def automation_run(request: RunRequest) -> None:
+    try:
+        browser = await ensure_browser()
+        existing: list[dict] = []
+        if RESULTS.exists():
+            existing = json.loads(RESULTS.read_text(encoding="utf-8"))
+        indexed = {job["url"]: job for job in existing}
+        total_blocked = 0
+        update(status="running", found=len(indexed), blocked=0, message="Busca automática iniciada.")
+        event("AUTOMATION_STARTED", roles=request.roles[: request.max_roles])
+        page = browser.pages[0] if browser.pages else await browser.new_page()
+        settings = AutomationSettings.model_validate(load_json(SETTINGS_DATA, {}))
+        locations = settings.preferred_locations or ["Brasil"]
+        for role_index, role in enumerate(request.roles[: request.max_roles]):
+            # Distribui as regiões entre cargos para manter a busca diária ágil.
+            location = locations[role_index % len(locations)]
+            for platform in PLATFORMS:
+                if asyncio.current_task() and asyncio.current_task().cancelling():
+                    raise asyncio.CancelledError
+                update(platform=platform, role=role, message=f"Pesquisando {role} em {platform}.")
+                try:
+                    jobs, blocked = await collect_page(page, platform, role, location)
+                    total_blocked += blocked
+                    for job in jobs:
+                        previous = indexed.get(job["url"])
+                        job["first_seen_at"] = (
+                            previous.get("first_seen_at") or previous.get("collected_at")
+                            if previous else job["collected_at"]
+                        )
+                        job["last_seen_at"] = job["collected_at"]
+                        if previous:
+                            for key in ("score", "match_reasons", "risks", "decision"):
+                                if key in previous:
+                                    job[key] = previous[key]
+                        indexed[job["url"]] = job
+                    RESULTS.parent.mkdir(parents=True, exist_ok=True)
+                    RESULTS.write_text(json.dumps(list(indexed.values()), ensure_ascii=False, indent=2), encoding="utf-8")
+                    update(found=len(indexed), blocked=total_blocked)
+                    event("SEARCH_COMPLETED", platform=platform, role=role, found=len(jobs), blocked=blocked)
+                except Exception as exc:
+                    logging.exception("search_failed")
+                    event("SEARCH_FAILED", platform=platform, role=role, error=type(exc).__name__)
+                await page.wait_for_timeout(1800)
+        update(status="completed", platform=None, role=None, found=len(indexed), blocked=total_blocked, message="Busca concluída. Resultados disponíveis no painel.")
+        event("AUTOMATION_COMPLETED", found=len(indexed), blocked=total_blocked)
+    except asyncio.CancelledError:
+        update(status="stopped", platform=None, role=None, message="Automação interrompida pelo usuário.")
+        event("AUTOMATION_STOPPED")
+
+
+async def inspect_application_queue(request: PrepareRequest) -> None:
+    profile = ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {}))
+    settings = AutomationSettings.model_validate(load_json(SETTINGS_DATA, {}))
+    applications = load_json(APPLICATIONS, [])
+    indexed = {item["job_url"]: item for item in applications}
+    jobs = load_json(RESULTS, [])
+    candidates = [
+        job for job in jobs
+        if job.get("decision") == "APPROVED_AUTO" and job.get("url") not in indexed
+    ]
+    candidates.sort(key=lambda job: (
+        -(datetime.fromisoformat(job.get("first_seen_at") or job.get("collected_at")).timestamp()),
+        geography_priority(job),
+    ))
+    candidates = candidates[: request.limit]
+    if not profile.full_name or not profile.email or not profile.resume_path:
+        update(
+            status="profile_required",
+            message="Preencha nome, e-mail e currículo antes de preparar candidaturas.",
+        )
+        return
+    browser = await ensure_browser()
+    page = browser.pages[0] if browser.pages else await browser.new_page()
+    update(status="preparing", message=f"Inspecionando {len(candidates)} candidaturas qualificadas.")
+    for job in candidates:
+        url = str(job["url"])
+        application = {
+            "id": str(uuid.uuid4()),
+            "job_url": url,
+            "title": job.get("title", ""),
+            "source": job.get("source", ""),
+            "score": job.get("score", 0),
+            "status": "INSPECTING",
+            "created_at": datetime.now(UTC).isoformat(),
+            "job_first_seen_at": job.get("first_seen_at") or job.get("collected_at"),
+            "submitted_at": None,
+            "reason": "",
+        }
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            await page.wait_for_timeout(2500)
+            dismissed = await dismiss_overlays(page)
+            current_url = page.url.lower()
+            body = (await page.locator("body").inner_text(timeout=10_000))[:80_000]
+            assessment = opportunity_feedback(application["title"], body, settings)
+            application.update(assessment)
+            if re.search(r"n[aã]o aceita mais candidaturas|vaga (?:foi )?encerrada|processo seletivo encerrado|no longer accepting applications|job is no longer available", body, re.IGNORECASE):
+                application["status"] = "CLOSED"
+                application["reason"] = "Vaga encerrada: a plataforma não aceita mais candidaturas."
+            elif "gupy.io" in current_url or "gupy.io" in body.lower():
+                application["status"] = "BLOCKED"
+                application["reason"] = "Ignorada: plataforma bloqueada pelo usuário."
+            elif re.search(r"captcha|recaptcha|não sou um robô", body, re.IGNORECASE):
+                application["status"] = "MANUAL_REQUIRED"
+                application["reason"] = "CAPTCHA detectado."
+            else:
+                apply_locator = page.get_by_role(
+                    "button",
+                    name=re.compile(r"candidat|inscrever|apply|tenho interesse", re.IGNORECASE),
+                )
+                apply_links = page.get_by_role(
+                    "link",
+                    name=re.compile(r"candidat|inscrever|apply|tenho interesse", re.IGNORECASE),
+                )
+                has_button = any([await apply_locator.nth(i).is_visible() for i in range(min(await apply_locator.count(), 8))])
+                has_link = any([await apply_links.nth(i).is_visible() for i in range(min(await apply_links.count(), 8))])
+                application["status"] = "READY_TO_PREPARE" if has_button or has_link else "MANUAL_REQUIRED"
+                application["dismissed_overlays"] = dismissed
+                application["reason"] = (
+                    "Ação de candidatura localizada; aguardando preenchimento seguro."
+                    if has_button or has_link
+                    else "Botão de candidatura não localizado ou layout desconhecido."
+                )
+        except Exception as exc:
+            application["status"] = "FAILED"
+            application["reason"] = f"Falha de inspeção: {type(exc).__name__}."
+        indexed[url] = application
+        save_json(APPLICATIONS, list(indexed.values()))
+        event(
+            "APPLICATION_INSPECTED",
+            job_url=url,
+            status=application["status"],
+            score=application["score"],
+        )
+    update(
+        status="completed",
+        message="Inspeção concluída. Nenhuma candidatura foi enviada sem autorização de autoenvio.",
+    )
+
+
+async def fill_known_fields(page: Page, profile: ProfessionalProfile) -> list[str]:
+    values = {
+        r"nome|name": profile.full_name,
+        r"e-?mail": profile.email,
+        r"telefone|celular|phone|mobile": profile.phone,
+        r"cidade|city": profile.city,
+        r"estado|state": profile.state,
+        r"linkedin": profile.linkedin_url,
+        r"pretens|sal[aá]rio|salary": profile.salary_expectation,
+    }
+    filled: list[str] = []
+    for pattern, value in values.items():
+        if not value:
+            continue
+        locator = page.get_by_label(re.compile(pattern, re.IGNORECASE))
+        count = min(await locator.count(), 3)
+        for index in range(count):
+            field = locator.nth(index)
+            try:
+                if await field.is_visible() and await field.is_editable():
+                    await field.fill(value)
+                    filled.append(pattern)
+            except Exception:
+                continue
+    resume = Path(profile.resume_path)
+    if resume.exists():
+        file_inputs = page.locator('input[type="file"]')
+        for index in range(await file_inputs.count()):
+            try:
+                await file_inputs.nth(index).set_input_files(str(resume))
+                filled.append("resume")
+            except Exception:
+                continue
+    return filled
+
+
+async def ai_fill_simple_questions(page: Page, profile: ProfessionalProfile, application: dict) -> dict[str, object]:
+    questions = await page.locator("input[required], textarea[required], select[required]").evaluate_all(
+        """els => els.filter(el => el.getClientRects().length && !el.disabled).map((el, index) => {
+          let container = el.closest('fieldset, [role="group"], .form-group, .question, li');
+          if (!container && (el.type === 'radio' || el.type === 'checkbox')) {
+            let node = el.parentElement;
+            while (node && node !== document.body) {
+              if (node.querySelectorAll(`input[type="${el.type}"]`).length >= 2 && (node.innerText || '').trim().length > 5) { container = node; break; }
+              node = node.parentElement;
+            }
+          }
+          container = container || el.closest('label') || el.parentElement;
+          const text = (container?.innerText || el.getAttribute('aria-label') || el.name || '').trim();
+          let options = [];
+          if (el.type === 'radio' || el.type === 'checkbox') {
+            const root = el.closest('fieldset, [role="group"], .form-group, .question') || container;
+            options = [...(root?.querySelectorAll('label') || [])].map(x => x.innerText.trim()).filter(Boolean);
+          } else if (el.tagName === 'SELECT') {
+            options = [...el.options].map(x => x.text.trim()).filter(Boolean);
+          }
+          return {index, type: el.type || el.tagName.toLowerCase(), name: el.name || el.id || '', question: text.slice(0, 1200), options: [...new Set(options)].slice(0, 20), maxLength: el.maxLength > 0 ? el.maxLength : null, placeholder: el.placeholder || ''};
+        }).filter((x, i, arr) => x.question && arr.findIndex(y => y.name === x.name && y.question === x.question) === i)"""
+    )
+    questions = [q for q in questions if not re.search(r"report|denunci|newsletter|search", f"{q.get('name','')} {q.get('question','')}", re.I)]
+    if not questions:
+        return {"filled": [], "unresolved": []}
+    system = (
+        "Você é um redator profissional brasileiro preenchendo um formulário de emprego em nome do candidato. "
+        "Leia a pergunta inteira, as opções, o cargo, o perfil e o currículo antes de responder. Use SOMENTE fatos comprovados. "
+        "Escreva em primeira pessoa, de forma humana, natural, segura e objetiva. Não use linguagem de IA, elogios vazios, clichês, "
+        "superlativos ou repetições. Para rádio/select, escolha literalmente uma opção oferecida. Para campo curto, use uma frase. "
+        "Para pergunta aberta, use 2 a 4 frases e no máximo 450 caracteres: experiência concreta, relação com a vaga e contribuição. "
+        "Respeite maxLength. Não inclua saudação ou despedida. Responda SOMENTE JSON válido no formato "
+        "{\"answers\":[{\"name\":\"\",\"answer\":\"\",\"confidence\":0.0,\"evidence\":\"\"}]}. "
+        "Evidence deve citar o trecho ou competência do currículo que sustenta a resposta. Se não houver prova, answer deve ser vazio. Não invente."
+    )
+    payload_data = {"job": application.get("title", ""), "questions": questions,
+                    "profile": profile.model_dump(), "resume": resume_text(profile)}
+    payload = {"model": "local", "temperature": 0.0, "max_tokens": 1000,
+               "messages": [{"role": "system", "content": system},
+                            {"role": "user", "content": json.dumps(payload_data, ensure_ascii=False)}]}
+    result = await asyncio.to_thread(_http_json, f"{LOCAL_AI_URL}/chat/completions", payload, 90)
+    content = result["choices"][0]["message"]["content"]
+    parsed = json.loads(re.search(r"\{.*\}", content, re.DOTALL).group(0))
+    filled, unresolved = [], []
+    for answer in parsed.get("answers", []):
+        name, value = str(answer.get("name", "")), str(answer.get("answer", "")).strip()
+        evidence = str(answer.get("evidence", "")).strip()
+        if (not value or not evidence or float(answer.get("confidence", 0)) < 0.85
+                or re.search(r"como (?:uma )?ia|modelo de linguagem|apaixonad[oa]|sempre sonhei", value, re.I)):
+            unresolved.append(name)
+            continue
+        question_meta = next((q for q in questions if q.get("name") == name), {})
+        max_length = question_meta.get("maxLength") or 450
+        if len(value) > max_length:
+            value = value[:max_length].rsplit(" ", 1)[0].rstrip(" ,;:") + "."
+        fields = page.locator(f'[name="{name}"]') if name else page.locator("__missing__")
+        matched = False
+        for index in range(await fields.count()):
+            field = fields.nth(index)
+            try:
+                field_type = await field.get_attribute("type") or ""
+                if field_type in {"radio", "checkbox"}:
+                    field_value = await field.get_attribute("value") or ""
+                    field_id = await field.get_attribute("id") or ""
+                    label = page.locator(f'label[for="{field_id}"]')
+                    label_text = await label.inner_text() if await label.count() else ""
+                    if value.lower() in {field_value.lower(), label_text.strip().lower()}:
+                        await field.check()
+                        matched = True
+                elif await field.is_editable():
+                    await field.fill(value)
+                    matched = True
+            except Exception:
+                continue
+        if matched:
+            filled.append({"name": name, "answer": value, "evidence": answer.get("evidence", "")})
+        else:
+            unresolved.append(name)
+    event("AI_FORM_FILLED", application_id=application.get("id"), filled=len(filled), unresolved=len(unresolved))
+    return {"filled": filled, "unresolved": unresolved}
+
+
+async def required_unknown_fields(page: Page) -> list[str]:
+    return await page.locator("input[required], textarea[required], select[required]").evaluate_all(
+        """els => els.filter(el => {
+          if (el.type === 'hidden' || el.type === 'submit') return false;
+          if (!el.isConnected || el.disabled || el.getClientRects().length === 0) return false;
+          const style = getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden') return false;
+          if (el.closest('[hidden], [aria-hidden="true"], dialog:not([open])')) return false;
+          const marker = `${el.name || ''} ${el.id || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase();
+          if (/report|denunci|newsletter|search/.test(marker)) return false;
+          if (el.type === 'checkbox' || el.type === 'radio') return !el.checked;
+          return !String(el.value || '').trim();
+        }).map(el => el.getAttribute('aria-label') || el.name || el.id || el.type || 'campo obrigatório')"""
+    )
+
+
+async def dismiss_overlays(page: Page) -> list[str]:
+    dismissed: list[str] = []
+    pattern = re.compile(r"ok,? entendi|entendi|continuar sem|agora não", re.IGNORECASE)
+    for role in ("button", "link"):
+        locator = page.get_by_role(role, name=pattern)
+        for index in range(min(await locator.count(), 5)):
+            item = locator.nth(index)
+            try:
+                if await item.is_visible():
+                    dismissed.append((await item.inner_text()).strip()[:80])
+                    await item.click(timeout=3000)
+                    await page.wait_for_timeout(350)
+            except Exception:
+                continue
+    try:
+        await page.keyboard.press("Escape")
+    except Exception:
+        pass
+    return dismissed
+
+
+async def click_first_visible(page: Page, pattern: str) -> bool:
+    matcher = re.compile(pattern, re.IGNORECASE)
+    for role in ("button", "link"):
+        locator = page.get_by_role(role, name=matcher)
+        for index in range(min(await locator.count(), 8)):
+            item = locator.nth(index)
+            try:
+                if await item.is_visible() and await item.is_enabled():
+                    await item.click(timeout=8000)
+                    return True
+            except Exception:
+                continue
+    # Alguns portais desenham o CTA em div/span sem semântica de botão.
+    locator = page.locator("button, a, [role='button'], input[type='button'], input[type='submit']").filter(has_text=matcher)
+    for index in range(min(await locator.count(), 12)):
+        item = locator.nth(index)
+        try:
+            if await item.is_visible():
+                await item.click(timeout=8000)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def remember_layout(application: dict, stage: str, details: dict | None = None) -> None:
+    knowledge = load_json(LAYOUT_KNOWLEDGE, {})
+    host = urlparse(str(application.get("job_url", ""))).netloc.lower() or "unknown"
+    history = knowledge.setdefault(host, [])
+    history.append({"at": datetime.now(UTC).isoformat(), "stage": stage,
+                    "status": application.get("status"), "reason": application.get("reason", ""),
+                    "details": details or {}})
+    knowledge[host] = history[-50:]
+    save_json(LAYOUT_KNOWLEDGE, knowledge)
+
+
+async def submission_confirmed(page: Page, previous_url: str) -> bool:
+    body = (await page.locator("body").inner_text(timeout=10_000))[:40_000]
+    success_text = re.search(
+        r"candidatura (?:foi )?enviada|candidatura realizada|cv enviado|inscri[cç][aã]o (?:foi )?conclu[ií]da|application submitted|successfully applied|já se candidatou",
+        body, re.IGNORECASE,
+    )
+    success_url = page.url != previous_url and bool(re.search(r"success|confirmation|application", page.url, re.IGNORECASE))
+    return bool(success_text or success_url)
+
+
+async def execute_application_queue(request: ExecuteRequest) -> None:
+    settings = AutomationSettings.model_validate(load_json(SETTINGS_DATA, {}))
+    profile = ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {}))
+    applications = load_json(APPLICATIONS, [])
+    def retryable(application: dict) -> bool:
+        if application.get("status") == "READY_TO_PREPARE":
+            return True
+        attempts = int(application.get("attempts", 0))
+        if attempts >= 3:
+            return False
+        if application.get("status") == "FAILED" and "TimeoutError" in application.get("reason", ""):
+            return True
+        if application.get("status") == "READY_FOR_REVIEW" and "botão final não localizado" in application.get("reason", ""):
+            return True
+        if application.get("status") == "MANUAL_REQUIRED" and application.get("unknown_fields"):
+            return True
+        return False
+
+    pending = sorted([
+        application for application in applications
+        if retryable(application) and (not request.application_ids or application.get("id") in request.application_ids)
+    ], key=lambda application: (
+        -(datetime.fromisoformat(application.get("job_first_seen_at") or application.get("created_at")).timestamp()),
+        geography_priority(application),
+    ))[: request.limit]
+    browser = await ensure_browser()
+    page = browser.pages[0] if browser.pages else await browser.new_page()
+    submitted = 0
+    total = len(pending)
+    update(status="applying", message=f"Preparando {total} candidaturas.")
+    for position, application in enumerate(pending, start=1):
+        application["attempts"] = int(application.get("attempts", 0)) + 1
+        update(status="applying", platform=application.get("source"), role=application.get("title"),
+               message=f"Candidatura {position}/{total}: abrindo vaga.")
+        try:
+            await page.goto(application["job_url"], wait_until="commit", timeout=35_000)
+            await page.wait_for_timeout(2000)
+            if "gupy.io" in page.url.lower():
+                application["status"] = "BLOCKED"
+                application["reason"] = "Ignorada: plataforma bloqueada pelo usuário."
+                continue
+            body = (await page.locator("body").inner_text())[:100_000]
+            application.update(opportunity_feedback(application["title"], body, settings))
+            if re.search(r"n[aã]o aceita mais candidaturas|vaga (?:foi )?encerrada|processo seletivo encerrado|no longer accepting applications|job is no longer available", body, re.IGNORECASE):
+                application["status"] = "CLOSED"
+                application["reason"] = "Vaga encerrada: a plataforma não aceita mais candidaturas."
+                remember_layout(application, "closed_vacancy")
+                continue
+            if re.search(r"candidatura realizada(?: hoje)?|cv enviado|já se candidatou|application submitted|successfully applied", body, re.IGNORECASE):
+                application["status"] = "APPLIED"
+                application["submitted_at"] = application.get("submitted_at") or datetime.now(UTC).isoformat()
+                application["reason"] = "Candidatura confirmada pela plataforma (já enviada)."
+                submitted += 1
+                event("APPLICATION_ALREADY_SUBMITTED", application_id=application["id"])
+                continue
+            if re.search(r"captcha|recaptcha|não sou um robô", body, re.IGNORECASE):
+                application["status"] = "MANUAL_REQUIRED"
+                application["reason"] = "CAPTCHA detectado."
+                continue
+            dismissed = await dismiss_overlays(page)
+            action_clicked = await click_first_visible(
+                page, r"quero me candidatar|candidatura f[aá]cil|candidatar(?:-se)?|inscrever|apply now|easy apply|tenho interesse"
+            )
+            if action_clicked:
+                await page.wait_for_timeout(1800)
+                await dismiss_overlays(page)
+            filled = await fill_known_fields(page, profile)
+            ai_result = await ai_fill_simple_questions(page, profile, application)
+            unknown = await required_unknown_fields(page)
+            SCREENSHOTS.mkdir(parents=True, exist_ok=True)
+            evidence = SCREENSHOTS / f"{application['id']}-prepared.png"
+            await page.screenshot(path=str(evidence), full_page=True)
+            application["evidence"] = str(evidence)
+            application["filled_fields"] = filled
+            application["ai_answers"] = ai_result.get("filled", [])
+            application["unknown_fields"] = unknown
+            application["dismissed_overlays"] = dismissed
+            if unknown:
+                application["status"] = "MANUAL_REQUIRED"
+                application["reason"] = f"Resposta ainda não comprovada: {', '.join(unknown[:5])}."
+                remember_layout(application, "required_fields", {"fields": unknown})
+                continue
+            submit = page.get_by_role("button", name=re.compile(
+                r"enviar candidatura|enviar meu curr[ií]culo|submit application|finalizar candidatura|confirmar candidatura|concluir candidatura",
+                re.IGNORECASE,
+            ))
+            visible_submit = None
+            for index in range(min(await submit.count(), 5)):
+                if await submit.nth(index).is_visible() and await submit.nth(index).is_enabled():
+                    visible_submit = submit.nth(index)
+                    break
+            can_submit = visible_submit is not None
+            live_allowed = (
+                settings.auto_apply_enabled
+                and request.confirm_live_submission
+                and environment_auto_apply_enabled()
+            )
+            if can_submit and live_allowed:
+                before_submit = page.url
+                await visible_submit.click(timeout=8000)
+                await page.wait_for_timeout(2200)
+                if await submission_confirmed(page, before_submit):
+                    application["status"] = "APPLIED"
+                    application["submitted_at"] = datetime.now(UTC).isoformat()
+                    application["reason"] = "Envio confirmado pela plataforma."
+                    submitted += 1
+                    event("APPLICATION_SUBMITTED", application_id=application["id"])
+                else:
+                    application["status"] = "MANUAL_REQUIRED"
+                    application["reason"] = "Envio acionado, mas sem confirmação da plataforma; não contabilizada."
+                    remember_layout(application, "submission_unconfirmed")
+            else:
+                application["status"] = "READY_FOR_REVIEW"
+                application["reason"] = (
+                    "Formulário preenchido; autoenvio desligado."
+                    if can_submit else "Formulário preparado; botão final não localizado."
+                )
+        except Exception as exc:
+            application["status"] = "FAILED"
+            application["reason"] = f"Falha na preparação: {type(exc).__name__}."
+            remember_layout(application, "exception", {"error": type(exc).__name__, "url": page.url[:160]})
+        finally:
+            save_json(APPLICATIONS, applications)
+    update(status="completed", message=f"Preparação concluída; {submitted} candidaturas enviadas.")
+    event("APPLICATION_RUN_COMPLETED", submitted=submitted, inspected=len(pending))
+
+
+async def analyze_all_jobs(minimum_score: int) -> dict[str, int]:
+    profile = ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {}))
+    jobs = load_json(RESULTS, [])
+    approved = review = ignored = 0
+    for job in jobs:
+        score, positives, risks = calculate_match(job, profile)
+        job["score"] = score
+        job["match_reasons"] = positives
+        job["risks"] = risks
+        if score >= minimum_score:
+            job["decision"] = "APPROVED_AUTO"
+            approved += 1
+        elif score >= 60:
+            job["decision"] = "REQUIRES_REVIEW"
+            review += 1
+        else:
+            job["decision"] = "IGNORED"
+            ignored += 1
+        job["status"] = "ANALYZED"
+    save_json(RESULTS, jobs)
+    event("JOBS_ANALYZED", approved=approved, review=review, ignored=ignored)
+    return {"analyzed": len(jobs), "approved": approved, "review": review, "ignored": ignored}
+
+
+async def full_daily_pipeline() -> None:
+    profile = ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {}))
+    settings = AutomationSettings.model_validate(load_json(SETTINGS_DATA, {}))
+    if not profile.full_name or not profile.email or not profile.resume_path:
+        update(status="profile_required", message="Currículo ou contatos obrigatórios não foram extraídos.")
+        return
+    event("DAILY_PIPELINE_STARTED")
+    await automation_run(RunRequest(roles=profile.target_roles, max_roles=min(10, len(profile.target_roles))))
+    await analyze_all_jobs(settings.minimum_score)
+    await inspect_application_queue(PrepareRequest(limit=settings.daily_target))
+    await execute_application_queue(ExecuteRequest(limit=settings.daily_target, confirm_live_submission=True))
+    event("DAILY_PIPELINE_COMPLETED")
+
+
+async def daily_scheduler() -> None:
+    global run_task
+    started = datetime.now().astimezone()
+    last_slot = f"{started.date().isoformat()}-{started.hour}" if started.hour in {8, 12, 18} else ""
+    while True:
+        now = datetime.now().astimezone()
+        slot = f"{now.date().isoformat()}-{now.hour}"
+        profile = ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {}))
+        if now.hour in {8, 12, 18} and slot != last_slot and profile.target_roles:
+            last_slot = slot
+            if not run_task or run_task.done():
+                event("SCHEDULE_TRIGGERED", slot=slot)
+                run_task = asyncio.create_task(full_daily_pipeline())
+        await asyncio.sleep(60)
+
+
+async def google_mail_scheduler() -> None:
+    await asyncio.sleep(20)
+    while True:
+        if GOOGLE_TOKEN.exists():
+            try:
+                result = await asyncio.to_thread(scan_recruitment_mail, GOOGLE_TOKEN, GOOGLE_INBOX, 90, 250)
+                event("GOOGLE_MAIL_SCANNED", scanned=result["scanned"], discovered=result["discovered"])
+            except Exception as exc:
+                event("GOOGLE_MAIL_SCAN_FAILED", error=type(exc).__name__)
+        await asyncio.sleep(600)
+
+
+@app.on_event("startup")
+async def startup_scheduler() -> None:
+    update(status="ready", message="Agente pronto. Próximas execuções automáticas: 08:00, 12:00 e 18:00.")
+    asyncio.create_task(daily_scheduler())
+    asyncio.create_task(google_mail_scheduler())
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/status")
+async def get_status() -> dict[str, object]:
+    return state
+
+
+@app.get("/ai/status")
+async def get_ai_status() -> dict[str, object]:
+    return await local_ai_status()
+
+
+@app.get("/google/status")
+async def google_status() -> dict:
+    items = load_json(GOOGLE_INBOX, [])
+    if not GOOGLE_TOKEN.exists():
+        return {"connected": False, "email": None, "calendar": False, "alerts": 0, "last_items": items[:20]}
+    cached = load_json(GOOGLE_STATUS_CACHE, {})
+    checked_at = cached.get("checked_at")
+    if checked_at:
+        try:
+            age = datetime.now(UTC) - datetime.fromisoformat(checked_at)
+            if age.total_seconds() < 600:
+                cached["alerts"] = len([item for item in items if item.get("status") == "NEW"])
+                cached["last_items"] = items[:20]
+                return cached
+        except (TypeError, ValueError):
+            pass
+    try:
+        status = await asyncio.to_thread(connection_status, GOOGLE_TOKEN)
+        status["checked_at"] = datetime.now(UTC).isoformat()
+        save_json(GOOGLE_STATUS_CACHE, status)
+        status["alerts"] = len([item for item in items if item.get("status") == "NEW"])
+        status["last_items"] = items[:20]
+        return status
+    except Exception as exc:
+        if cached.get("connected"):
+            cached["alerts"] = len([item for item in items if item.get("status") == "NEW"])
+            cached["last_items"] = items[:20]
+            cached["warning"] = type(exc).__name__
+            return cached
+        return {"connected": False, "email": None, "calendar": False, "alerts": 0, "last_items": items[:20], "error": type(exc).__name__}
+
+
+@app.post("/google/scan")
+async def google_scan() -> dict:
+    if not GOOGLE_TOKEN.exists():
+        raise HTTPException(status_code=401, detail="Google ainda não autorizado.")
+    try:
+        result = await asyncio.to_thread(scan_recruitment_mail, GOOGLE_TOKEN, GOOGLE_INBOX, 90, 250)
+        event("GOOGLE_MAIL_SCANNED", scanned=result["scanned"], discovered=result["discovered"])
+        return result
+    except Exception as exc:
+        event("GOOGLE_MAIL_SCAN_FAILED", error=type(exc).__name__)
+        raise HTTPException(status_code=502, detail=f"Falha ao consultar Gmail: {type(exc).__name__}") from exc
+
+
+@app.post("/google/draft")
+async def google_draft(request: GoogleDraftRequest) -> dict:
+    try:
+        result = await asyncio.to_thread(create_reply_draft, GOOGLE_TOKEN, GOOGLE_INBOX, request.message_id)
+        event("GOOGLE_REPLY_DRAFT_CREATED", subject=result.get("subject"))
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao criar rascunho: {type(exc).__name__}") from exc
+
+
+@app.post("/google/calendar")
+async def google_calendar(request: GoogleDraftRequest) -> dict:
+    try:
+        result = await asyncio.to_thread(create_calendar_event, GOOGLE_TOKEN, GOOGLE_INBOX, request.message_id)
+        event("GOOGLE_CALENDAR_EVENT_CREATED", subject=result.get("subject"))
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao criar compromisso: {type(exc).__name__}") from exc
+
+
+@app.post("/google/questionnaire/complete")
+async def google_questionnaire_complete(request: GoogleDraftRequest) -> dict:
+    try:
+        result = await asyncio.to_thread(mark_questionnaire_complete, GOOGLE_INBOX, request.message_id)
+        event("GOOGLE_QUESTIONNAIRE_MARKED_COMPLETE", subject=result.get("subject"))
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/ai/advice")
+async def get_ai_advice(request: AIAdviceRequest) -> dict[str, object]:
+    profile = ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {}))
+    try:
+        decision = await local_ai_advice(request, profile)
+        event("LOCAL_AI_DECISION", action=decision.get("action"), confidence=decision.get("confidence"))
+        return decision
+    except (URLError, TimeoutError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=503, detail=f"IA local indisponível: {type(exc).__name__}") from exc
+
+
+@app.get("/jobs")
+async def get_jobs() -> list[dict]:
+    if not RESULTS.exists():
+        return []
+    return json.loads(RESULTS.read_text(encoding="utf-8"))
+
+
+@app.get("/profile")
+async def get_profile() -> dict:
+    return ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {})).model_dump()
+
+
+@app.get("/settings")
+async def get_settings() -> dict:
+    return AutomationSettings.model_validate(load_json(SETTINGS_DATA, {})).model_dump()
+
+
+@app.put("/settings")
+async def put_settings(settings: AutomationSettings) -> dict:
+    save_json(SETTINGS_DATA, settings.model_dump())
+    event("AUTOMATION_SETTINGS_UPDATED", auto_apply_enabled=settings.auto_apply_enabled)
+    return settings.model_dump()
+
+
+@app.put("/profile")
+async def put_profile(profile: ProfessionalProfile) -> dict:
+    save_json(PROFILE_DATA, profile.model_dump())
+    event("PROFILE_UPDATED")
+    return profile.model_dump()
+
+
+@app.post("/profile/resume")
+async def upload_resume(file: UploadFile = File(...)) -> dict[str, str]:
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".pdf", ".docx"}:
+        raise HTTPException(status_code=400, detail="Envie um arquivo PDF ou DOCX.")
+    RESUMES.mkdir(parents=True, exist_ok=True)
+    target = RESUMES / f"resume-{uuid.uuid4().hex}{suffix}"
+    with target.open("wb") as handle:
+        shutil.copyfileobj(file.file, handle)
+    if target.stat().st_size > 10 * 1024 * 1024:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Currículo maior que 10 MB.")
+    profile = ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {}))
+    profile.resume_path = str(target)
+    save_json(PROFILE_DATA, profile.model_dump())
+    event("RESUME_IMPORTED", filename=target.name)
+    return {"resume_path": str(target), "filename": file.filename or target.name}
+
+
+@app.post("/bootstrap")
+async def bootstrap_from_resume(request: BootstrapRequest) -> dict:
+    source = Path(request.resume_path).resolve()
+    if not source.exists() or not source.is_file():
+        raise HTTPException(status_code=404, detail="Currículo não encontrado.")
+    if source.stat().st_size > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Currículo maior que 10 MB.")
+    RESUMES.mkdir(parents=True, exist_ok=True)
+    target = RESUMES / f"resume-current{source.suffix.lower()}"
+    shutil.copy2(source, target)
+    profile = extract_resume_profile(target)
+    profile.resume_path = str(target)
+    save_json(PROFILE_DATA, profile.model_dump())
+    settings = AutomationSettings(
+        auto_apply_enabled=True,
+        minimum_score=75,
+        daily_target=20,
+        require_complete_profile=True,
+    )
+    save_json(SETTINGS_DATA, settings.model_dump())
+    event("SYSTEM_BOOTSTRAPPED_FROM_RESUME", skills=len(profile.skills))
+    return {"profile": profile.model_dump(), "settings": settings.model_dump()}
+
+
+@app.post("/analyze")
+async def analyze_jobs(request: AnalyzeRequest) -> dict[str, int]:
+    return await analyze_all_jobs(request.minimum_score)
+
+
+@app.get("/applications")
+async def get_applications() -> list[dict]:
+    return load_json(APPLICATIONS, [])
+
+
+@app.post("/applications/prepare")
+async def prepare_applications(request: PrepareRequest) -> dict[str, bool]:
+    global run_task
+    if run_task and not run_task.done():
+        raise HTTPException(status_code=409, detail="Já existe uma execução em andamento.")
+    run_task = asyncio.create_task(inspect_application_queue(request))
+    return {"accepted": True}
+
+
+@app.post("/applications/execute")
+async def execute_applications(request: ExecuteRequest) -> dict[str, bool]:
+    global run_task
+    if run_task and not run_task.done():
+        raise HTTPException(status_code=409, detail="Já existe uma execução em andamento.")
+    run_task = asyncio.create_task(execute_application_queue(request))
+    return {"accepted": True}
+
+
+@app.post("/play")
+async def play_daily_pipeline() -> dict[str, bool]:
+    global run_task
+    if run_task and not run_task.done():
+        raise HTTPException(status_code=409, detail="Já existe uma execução em andamento.")
+    run_task = asyncio.create_task(full_daily_pipeline())
+    return {"accepted": True}
+
+
+@app.post("/browser/start")
+async def browser_start() -> dict[str, object]:
+    await ensure_browser()
+    return state
+
+
+@app.post("/browser/login")
+async def browser_login() -> dict[str, object]:
+    browser = await ensure_browser()
+    for name, url in PLATFORMS.items():
+        page = await browser.new_page()
+        await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        event("LOGIN_PAGE_OPENED", platform=name)
+    update(status="login_required", message="Faça login nas quatro abas e volte ao painel.")
+    return state
+
+
+@app.post("/browser/manual-login")
+async def browser_manual_login() -> dict[str, object]:
+    """Release Playwright and open the same profile in ordinary Chrome for OAuth login."""
+    global playwright, context
+    if run_task and not run_task.done():
+        raise HTTPException(status_code=409, detail="Interrompa a busca antes do login manual.")
+    if context:
+        await context.close()
+        context = None
+    if playwright:
+        await playwright.stop()
+        playwright = None
+    chrome = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+    if not chrome.exists():
+        chrome = Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe")
+    if not chrome.exists():
+        raise HTTPException(status_code=500, detail="Google Chrome não encontrado.")
+    command = [str(chrome), f"--user-data-dir={PROFILE}", *PLATFORMS.values()]
+    subprocess.Popen(command, close_fds=True)
+    update(status="manual_login", message="Chrome normal aberto. Entre pelo Google e feche a janela antes de retomar a automação.")
+    event("MANUAL_LOGIN_BROWSER_STARTED")
+    return state
+
+
+@app.post("/run")
+async def start_run(request: RunRequest) -> dict[str, object]:
+    global run_task
+    if run_task and not run_task.done():
+        raise HTTPException(status_code=409, detail="Já existe uma busca em andamento.")
+    run_task = asyncio.create_task(automation_run(request))
+    return {"accepted": True}
+
+
+@app.post("/stop")
+async def stop_run() -> dict[str, object]:
+    if run_task and not run_task.done():
+        run_task.cancel()
+    update(status="stopped", message="Parada solicitada pelo usuário.")
+    return state

@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: careeros-automation-host
+Version: 0.1.0
+Requires-Python: >=3.12
+Requires-Dist: fastapi==0.115.8
+Requires-Dist: playwright==1.50.0
+Requires-Dist: pydantic<3,>=2.10
+Requires-Dist: python-multipart==0.0.20
+Requires-Dist: pypdf==5.1.0
+Requires-Dist: google-api-python-client<3,>=2.180
+Requires-Dist: google-auth-httplib2<1,>=0.2
+Requires-Dist: google-auth-oauthlib<2,>=1.2
+Requires-Dist: uvicorn[standard]==0.34.0

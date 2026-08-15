@@ -1,0 +1,13 @@
+.git
+.env
+.venv
+node_modules
+**/node_modules
+**/.next
+.runtime
+uploads
+coverage
+htmlcov
+*.log
+*.pdf
+*.docx

@@ -1,0 +1,8 @@
+pyproject.toml
+src/__init__.py
+src/main.py
+src/careeros_automation_host.egg-info/PKG-INFO
+src/careeros_automation_host.egg-info/SOURCES.txt
+src/careeros_automation_host.egg-info/dependency_links.txt
+src/careeros_automation_host.egg-info/requires.txt
+src/careeros_automation_host.egg-info/top_level.txt

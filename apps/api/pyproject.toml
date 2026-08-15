@@ -1,0 +1,26 @@
+[project]
+name = "careeros-api"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "alembic==1.14.1",
+  "asyncpg==0.30.0",
+  "fastapi==0.115.8",
+  "pydantic-settings==2.7.1",
+  "prometheus-client==0.21.1",
+  "python-json-logger==3.2.1",
+  "redis==5.2.1",
+  "sqlalchemy==2.0.38",
+  "uvicorn[standard]==0.34.0"
+]
+
+[project.optional-dependencies]
+dev = ["httpx==0.28.1", "pytest==8.3.4", "pytest-asyncio==0.25.3", "ruff==0.9.6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100

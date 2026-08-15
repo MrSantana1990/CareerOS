@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+node_modules/
+.next/
+coverage/
+htmlcov/
+.runtime/
+automation-host.pid
+uploads/
+*.log
+*.pdf
+*.docx
+!.github/
