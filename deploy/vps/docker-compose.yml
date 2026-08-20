@@ -1,0 +1,104 @@
+name: helpsystem-carreira
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: carreira
+      POSTGRES_USER: carreira
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U carreira -d carreira"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    networks: [private]
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?Defina REDIS_PASSWORD}"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD}"
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    networks: [private]
+
+  api:
+    build:
+      context: ../../apps/api
+    environment:
+      APP_NAME: HelpSystem Carreira
+      APP_ENV: production
+      DATABASE_URL: "postgresql+asyncpg://carreira:${POSTGRES_PASSWORD}@postgres:5432/carreira"
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:?Defina ADMIN_API_TOKEN}"
+      CORS_ORIGINS: "https://carreira.helpsystempro.site"
+      AUTO_APPLY_ENABLED: "false"
+      AUTO_APPLY_SAFETY_ACKNOWLEDGED: "false"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    networks: [private]
+
+  worker:
+    build:
+      context: ../../apps/worker
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      AUTO_APPLY_ENABLED: "false"
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    networks: [private]
+
+  web:
+    build:
+      context: ../..
+      dockerfile: apps/web/Dockerfile
+      args:
+        FOUNDATION_API_URL: http://api:8000
+        AUTOMATION_HOST_URL: http://127.0.0.1:8765
+    environment:
+      FOUNDATION_API_URL: http://api:8000
+      AUTOMATION_HOST_URL: http://127.0.0.1:8765
+    ports:
+      - "127.0.0.1:${CAREER_PORT:-8093}:3000"
+    depends_on:
+      api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:3000/"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    networks: [private]
+
+networks:
+  private:
+    internal: true
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -217,22 +217,22 @@ export default function Home() {
 
   return <main className="shell">
     <aside className="sidebar">
-      <h1>Career<span>OS</span></h1>
-      <p>Central local de carreira</p>
+      <h1>HelpSystem<span> Carreira</span></h1>
+      <p>CareerOS · motor inteligente</p>
       <nav>{nav.map(([id, label]) => <button key={id} className={view === id ? "active" : ""} onClick={() => setView(id)}>{label}</button>)}</nav>
     </aside>
     <section className="content">
       <header className="topbar">
-        <div><h2>{nav.find(([id]) => id === view)?.[1]}</h2><p>Operação assistida no seu Chrome</p></div>
+        <div><h2>{nav.find(([id]) => id === view)?.[1]}</h2><p>Decisões de carreira com automação responsável</p></div>
         <button className="danger" onClick={stopWork} disabled={!running}>PARAR AUTOMAÇÃO</button>
       </header>
 
       {view === "overview" && <>
-        <div className="notice"><strong>Central pronta para uso assistido</strong><span>Abra as plataformas pelo CareerOS. O login continua sendo feito diretamente no Chrome e nenhuma senha é armazenada.</span></div>
+        <div className="notice"><strong>Seu radar de oportunidades</strong><span>O CareerOS trabalha nos bastidores; você acompanha, aprova e controla tudo pelo HelpSystem Carreira.</span></div>
         <div className="metrics">{[["Vagas coletadas", String(jobs.length)], ["Candidaturas confirmadas", `${appliedCount} / 20`], ["Em processamento", String(pendingCount)], ["Links Gupy bloqueados", String(agent.blocked ?? 0)]].map(([label, value]) => <article key={label}><small>{label}</small><b>{value}</b></article>)}</div>
         <div className="grid two">
           <article className="panel"><h3>Começar agora</h3><p>Inicie uma sessão e escolha a plataforma. As páginas abrirão em novas abas deste mesmo Chrome, preservando seus logins existentes.</p><button className="primary" onClick={beginWork}>{running ? "Continuar trabalho" : "INICIAR TRABALHO"}</button></article>
-          <article className="panel"><h3>Estado do sistema</h3><p className={agent.status === "offline" ? "danger-text" : "ok"}>● Agente: {agent.status}</p><p>{agent.message}</p><p className={aiStatus.available ? "ok" : "muted"}>● Copiloto local: {aiStatus.available ? `ativo (${aiStatus.model})` : "inicializando ou indisponível"}</p><p>Privacidade da IA: somente neste computador</p><p>Autoenvio qualificado: ativado (score mínimo 75%)</p><p>Gupy: bloqueada</p></article>
+          <article className="panel"><h3>Estado do sistema</h3><p className={agent.status === "offline" ? "danger-text" : "ok"}>● Agente: {agent.status}</p><p>{agent.message}</p><p className={aiStatus.available ? "ok" : "muted"}>● Copiloto local: {aiStatus.available ? `ativo (${aiStatus.model})` : "inicializando ou indisponível"}</p><p>Privacidade da IA: ambiente controlado</p><p>Candidaturas: modo assistido com confirmação</p><p>Gupy: bloqueada</p></article>
         </div>
       </>}
 
@@ -258,7 +258,7 @@ export default function Home() {
           <div><span className="badge">{platform.priority}</span><h3>{platform.name}</h3><p>Buscar por: <strong>{mainRole}</strong></p></div>
           <div className="actions"><button onClick={() => openPlatform(platform.name, platform.home)}>Abrir / entrar</button><button className="primary" onClick={() => openPlatform(platform.name, platform.search(mainRole))}>Buscar vagas</button></div>
         </article>)}</div>
-        <div className="blocked"><strong>Gupy bloqueada</strong><span>Links para gupy.io não são oferecidos pelo CareerOS.</span></div>
+        <div className="blocked"><strong>Gupy bloqueada</strong><span>Links para gupy.io não são oferecidos pelo HelpSystem Carreira.</span></div>
       </>}
 
       {view === "jobs" && <article className="panel"><div className="section-header"><h3>Vagas coletadas ({jobs.length})</h3><button className="primary" onClick={() => void analyzeJobs()}>Analisar e calcular score</button></div>{jobs.length === 0 ? <p className="muted">Execute uma busca automática para preencher esta lista.</p> : <div className="job-list">{jobs.slice().reverse().map((job) => <a key={job.url} href={job.url} target="_blank" rel="noreferrer"><span className="badge">{job.source}</span><strong>{job.title}</strong><small>{job.score !== undefined ? `${job.score}% · ${job.decision}` : `${job.search_role} · ${job.status}`}</small></a>)}</div>}</article>}
@@ -270,8 +270,4 @@ export default function Home() {
       {view === "security" && <article className="panel"><h3>Proteções ativas</h3><ul><li>Nenhuma senha é solicitada ou armazenada.</li><li>Login, CAPTCHA e MFA permanecem sob seu controle no Chrome.</li><li>Gupy está bloqueada.</li><li>Somente vagas com score mínimo de 75% entram no autoenvio.</li><li>Campos sem resposta comprovada interrompem a candidatura.</li></ul></article>}
     </section>
   </main>;
-}
-
-function Empty({ title, text, action }: { title: string; text: string; action: () => void }) {
-  return <article className="panel empty"><h3>{title}</h3><p>{text}</p><button className="primary" onClick={action}>Abrir plataformas</button></article>;
 }

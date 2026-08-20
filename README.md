@@ -1,8 +1,8 @@
 <div align="center">
 
-# CareerOS
+# HelpSystem Carreira
 
-### Central local e inteligente para busca, candidatura e acompanhamento de carreira
+### Radar inteligente, candidaturas assistidas e acompanhamento de carreira
 
 [![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs)](apps/web)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi)](apps/automation-host)
@@ -11,7 +11,7 @@
 [![Local AI](https://img.shields.io/badge/IA-local--first-7C3AED)](docs/AI_AND_GOOGLE.md)
 [![Windows](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11)](SETUP_WINDOWS.md)
 
-**Busca vagas · calcula aderência · prepara candidaturas · acompanha respostas · organiza entrevistas**
+**Descobre · valida · pontua · recomenda · acompanha · aprende**
 
 </div>
 
