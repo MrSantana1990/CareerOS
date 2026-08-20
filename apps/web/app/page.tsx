@@ -2,22 +2,24 @@
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 
-type View = "overview" | "profile" | "platforms" | "jobs" | "applications" | "inbox" | "automation" | "settings" | "logs" | "security";
+type View = "overview" | "decisions" | "jobs" | "applications" | "profile" | "rules" | "platforms" | "inbox" | "automation" | "settings" | "logs" | "security";
 type LogEntry = { at: string; message: string };
 type AgentStatus = { status: string; platform?: string; role?: string; found: number; blocked: number; message: string };
 type Job = { source: string; title: string; url: string; search_role: string; status: string; score?: number; decision?: string };
 type Application = { id: string; title: string; source: string; score: number; status: string; reason: string; job_url: string; created_at?: string; submitted_at?: string | null; attempts?: number; ai_answers?: Array<{name: string; answer: string; evidence: string}>; region?: string; salary_brl?: number | null; recommendation?: string; feedback?: string };
-type AIStatus = { available: boolean; model?: string | null; privacy: string };
 type CareerMail = { message_id: string; subject: string; sender: string; received_at: string; category: string; confidence: number; reason: string; snippet: string; status: string; suggested_reply?: string; draft_id?: string | null; calendar_event_id?: string | null; event_candidate?: { title: string; start: string; end: string; timezone: string } | null; questionnaire_url?: string | null; questionnaire_status?: string | null };
 type GoogleStatus = { connected: boolean; email?: string | null; calendar: boolean; alerts: number; last_items: CareerMail[] };
 type Profile = { full_name: string; email: string; phone: string; city: string; state: string; linkedin_url: string; salary_expectation: string; work_models: string[]; target_roles: string[]; skills: string[]; approved_answers: Record<string, string>; resume_path: string };
+type CareerRule = { id: string; code: string; label: string; rule_type: string; configuration: Record<string, unknown>; priority: number; enabled: boolean };
+type Decision = { id: string; recommendation: string; status: string; summary: Record<string, unknown>; title: string; company?: string; location?: string; work_model?: string; source_url: string; fit?: number };
+type PortalDashboard = { workspace: { name: string; jobs: number; applications: number; pending_decisions: number }; rules: CareerRule[]; decisions: Decision[]; generatedAt: string };
 const AGENT_URL = "/agent";
 
 const nav: Array<[View, string]> = [
-  ["profile", "Perfil e Currículo"],
-  ["overview", "Visão Geral"], ["platforms", "Plataformas"], ["jobs", "Vagas"],
-  ["applications", "Candidaturas"], ["inbox", "E-mails e Agenda"], ["automation", "Automação"],
-  ["settings", "Configurações"], ["logs", "Logs"], ["security", "Segurança"],
+  ["overview", "Radar TI"], ["decisions", "Decisões"], ["jobs", "Oportunidades"],
+  ["applications", "Pipeline"], ["profile", "Perfil e Currículos"], ["rules", "Regras de carreira"],
+  ["platforms", "Fontes"], ["inbox", "Gmail e Agenda"], ["automation", "Automação"],
+  ["settings", "Preferências"], ["logs", "Auditoria"], ["security", "Segurança"],
 ];
 
 const platforms = [
@@ -42,8 +44,9 @@ export default function Home() {
   const [profile, setProfile] = useState<Profile>({ full_name: "", email: "", phone: "", city: "Campinas", state: "SP", linkedin_url: "", salary_expectation: "", work_models: ["REMOTE", "HYBRID"], target_roles: [], skills: [], approved_answers: {}, resume_path: "" });
   const [skillsText, setSkillsText] = useState("");
   const [profileMessage, setProfileMessage] = useState("");
-  const [aiStatus, setAiStatus] = useState<AIStatus>({ available: false, privacy: "local-only" });
   const [googleStatus, setGoogleStatus] = useState<GoogleStatus>({ connected: false, calendar: false, alerts: 0, last_items: [] });
+  const [dashboard, setDashboard] = useState<PortalDashboard | null>(null);
+  const [dashboardMessage, setDashboardMessage] = useState("Sincronizando dados da VPS…");
   const appliedCount = applications.filter((application) => application.status === "APPLIED").length;
   const pendingCount = applications.filter((application) => ["INSPECTING", "READY_TO_PREPARE", "READY_FOR_REVIEW"].includes(application.status)).length;
 
@@ -64,17 +67,28 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    async function refreshDashboard() {
+      const response = await fetch("/api/portal/dashboard", { cache: "no-store" }).catch(() => null);
+      if (!response?.ok) { setDashboardMessage("Central disponível, mas os dados ainda não sincronizaram."); return; }
+      setDashboard(await response.json() as PortalDashboard);
+      setDashboardMessage("Dados persistidos e atualizados pela VPS.");
+    }
+    void refreshDashboard();
+    const timer = window.setInterval(refreshDashboard, 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     async function refresh() {
       try {
         const statusResponse = await fetch(`${AGENT_URL}/status`);
         if (!statusResponse.ok) throw new Error("agent-status");
         if (statusResponse.ok) setAgent(await statusResponse.json() as AgentStatus);
-        const [jobsResult, applicationsResult, aiResult, googleResult] = await Promise.allSettled([
-          fetch(`${AGENT_URL}/jobs`), fetch(`${AGENT_URL}/applications`), fetch(`${AGENT_URL}/ai/status`), fetch(`${AGENT_URL}/google/status`),
+        const [jobsResult, applicationsResult, googleResult] = await Promise.allSettled([
+          fetch(`${AGENT_URL}/jobs`), fetch(`${AGENT_URL}/applications`), fetch(`${AGENT_URL}/google/status`),
         ]);
         if (jobsResult.status === "fulfilled" && jobsResult.value.ok) setJobs(await jobsResult.value.json() as Job[]);
         if (applicationsResult.status === "fulfilled" && applicationsResult.value.ok) setApplications(await applicationsResult.value.json() as Application[]);
-        if (aiResult.status === "fulfilled" && aiResult.value.ok) setAiStatus(await aiResult.value.json() as AIStatus);
         if (googleResult.status === "fulfilled" && googleResult.value.ok) setGoogleStatus(await googleResult.value.json() as GoogleStatus);
       } catch {
         setAgent((current) => ({ ...current, status: "offline", message: "Sem comunicação com o computador. Verifique o Wi-Fi; o painel tentará reconectar automaticamente." }));
@@ -215,26 +229,39 @@ export default function Home() {
     setTimeout(() => setSaved(false), 2500);
   }
 
+  async function decide(id: string, decision: "APPROVED" | "DISCARDED") {
+    const response = await fetch(`/api/portal/decisions/${id}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ decision }) });
+    if (!response.ok) { record("Não foi possível registrar a decisão."); return; }
+    setDashboard((current) => current ? { ...current, decisions: current.decisions.filter((item) => item.id !== id), workspace: { ...current.workspace, pending_decisions: Math.max(0, current.workspace.pending_decisions - 1) } } : current);
+    record(decision === "APPROVED" ? "Oportunidade aprovada para preparação." : "Oportunidade descartada com rastreabilidade.");
+  }
+
   return <main className="shell">
     <aside className="sidebar">
-      <h1>HelpSystem<span> Carreira</span></h1>
-      <p>CareerOS · motor inteligente</p>
+      <div className="brand-mark">H</div><h1>HelpSystem<span> Carreira</span></h1>
+      <p>CareerOS · orquestrador de carreira</p>
       <nav>{nav.map(([id, label]) => <button key={id} className={view === id ? "active" : ""} onClick={() => setView(id)}>{label}</button>)}</nav>
+      <div className="sidebar-foot"><span className="status-dot online" />VPS online</div>
     </aside>
     <section className="content">
       <header className="topbar">
-        <div><h2>{nav.find(([id]) => id === view)?.[1]}</h2><p>Decisões de carreira com automação responsável</p></div>
+        <div><span className="eyebrow">CENTRAL OPERACIONAL</span><h2>{nav.find(([id]) => id === view)?.[1]}</h2><p>Descobrir, validar, decidir e acompanhar oportunidades qualificadas.</p></div>
         <button className="danger" onClick={stopWork} disabled={!running}>PARAR AUTOMAÇÃO</button>
       </header>
 
       {view === "overview" && <>
-        <div className="notice"><strong>Seu radar de oportunidades</strong><span>O CareerOS trabalha nos bastidores; você acompanha, aprova e controla tudo pelo HelpSystem Carreira.</span></div>
-        <div className="metrics">{[["Vagas coletadas", String(jobs.length)], ["Candidaturas confirmadas", `${appliedCount} / 20`], ["Em processamento", String(pendingCount)], ["Links Gupy bloqueados", String(agent.blocked ?? 0)]].map(([label, value]) => <article key={label}><small>{label}</small><b>{value}</b></article>)}</div>
-        <div className="grid two">
-          <article className="panel"><h3>Começar agora</h3><p>Inicie uma sessão e escolha a plataforma. As páginas abrirão em novas abas deste mesmo Chrome, preservando seus logins existentes.</p><button className="primary" onClick={beginWork}>{running ? "Continuar trabalho" : "INICIAR TRABALHO"}</button></article>
-          <article className="panel"><h3>Estado do sistema</h3><p className={agent.status === "offline" ? "danger-text" : "ok"}>● Agente: {agent.status}</p><p>{agent.message}</p><p className={aiStatus.available ? "ok" : "muted"}>● Copiloto local: {aiStatus.available ? `ativo (${aiStatus.model})` : "inicializando ou indisponível"}</p><p>Privacidade da IA: ambiente controlado</p><p>Candidaturas: modo assistido com confirmação</p><p>Gupy: bloqueada</p></article>
+        <div className="hero-panel"><div><span className="eyebrow">RADAR INTELIGENTE</span><h3>Bom trabalho, Rodolfo.</h3><p>Menos candidaturas ruins. Mais decisões explicáveis e oportunidades com aderência real.</p></div><button className="primary" onClick={() => setView("decisions")}>Revisar decisões <span>{dashboard?.decisions.length ?? 0}</span></button></div>
+        <div className="metrics">{[["Encontradas", String(dashboard?.workspace.jobs ?? jobs.length), "Hoje e histórico"], ["Qualificadas", String(jobs.filter((job) => (job.score ?? 0) >= 75).length), "Fit mínimo 75"], ["Aplicadas", String(dashboard?.workspace.applications ?? appliedCount), "Confirmadas"], ["Ação necessária", String(dashboard?.workspace.pending_decisions ?? pendingCount), "Revisão humana"]].map(([label, value, hint]) => <article key={label}><small>{label}</small><b>{value}</b><span>{hint}</span></article>)}</div>
+        <div className="grid two dashboard-grid">
+          <article className="panel"><div className="section-header"><div><span className="eyebrow">PIPELINE</span><h3>Conversão de carreira</h3></div><button className="link-button" onClick={() => setView("applications")}>Ver pipeline</button></div><div className="pipeline">{[["Aplicadas", dashboard?.workspace.applications ?? appliedCount], ["Respostas", 0], ["Entrevistas", 0], ["Técnicas", 0], ["Propostas", 0]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong><i style={{width: `${Math.max(4, Number(value) * 8)}%`}} /></div>)}</div></article>
+          <article className="panel system-card"><div className="section-header"><div><span className="eyebrow">SAÚDE</span><h3>Estado dos motores</h3></div><span className="live-pill">VPS ativa</span></div><ul className="engine-list"><li><span className="status-dot online" />API, banco e fila</li><li><span className={`status-dot ${agent.status === "offline" ? "warning" : "online"}`} />Executor local: {agent.status === "offline" ? "desconectado" : agent.status}</li><li><span className={`status-dot ${googleStatus.connected ? "online" : "warning"}`} />Gmail e Agenda: {googleStatus.connected ? "conectados" : "configurar"}</li><li><span className="status-dot safe" />Autoenvio: bloqueado por segurança</li></ul><small className="muted">{dashboardMessage}</small></article>
         </div>
+        <article className="panel roadmap-strip"><div><span className="eyebrow">ESTRATÉGIA</span><h3>Como o CareerOS decide</h3></div>{["Descobrir", "Validar", "Pontuar", "Decidir", "Personalizar", "Acompanhar"].map((step, index) => <div className="roadmap-step" key={step}><b>{index + 1}</b><span>{step}</span></div>)}</article>
       </>}
+
+      {view === "decisions" && <><div className="notice"><strong>Inbox de decisões</strong><span>Somente oportunidades ambíguas, de alto impacto ou que exigem consentimento chegam aqui.</span></div>{!dashboard?.decisions.length ? <article className="panel empty-state"><div className="empty-icon">✓</div><h3>Nenhuma decisão pendente</h3><p>A fila está limpa. Novas oportunidades qualificadas aparecerão aqui com score, riscos e justificativas.</p><button className="primary" onClick={() => setView("rules")}>Revisar regras</button></article> : <div className="decision-grid">{dashboard.decisions.map((item) => <article className="panel decision-card" key={item.id}><div className="fit-ring"><strong>{item.fit ?? "—"}</strong><small>FIT</small></div><div><span className="badge">{item.recommendation}</span><h3>{item.title}</h3><p>{item.company ?? "Empresa não identificada"} · {item.work_model ?? "Modalidade a validar"}</p><small>{item.location ?? "Localização não informada"}</small><div className="decision-actions"><button className="primary" onClick={() => void decide(item.id, "APPROVED")}>Aprovar</button><button onClick={() => void decide(item.id, "DISCARDED")}>Descartar</button><a href={item.source_url} target="_blank" rel="noreferrer">Ver vaga</a></div></div></article>)}</div>}</>}
+
+      {view === "rules" && <><div className="notice"><strong>Memória operacional persistida</strong><span>Estas regras ficam no PostgreSQL e explicam por que uma vaga recebe bônus, risco, revisão ou bloqueio.</span></div><div className="rule-grid">{(dashboard?.rules ?? []).map((rule) => <article className="panel rule-card" key={rule.code}><div><span className={`rule-type ${rule.rule_type.toLowerCase()}`}>{rule.rule_type}</span><small>Prioridade {rule.priority}</small></div><h3>{rule.label}</h3><code>{rule.code}</code><p>{Object.entries(rule.configuration).map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(", ") : String(value)}`).join(" · ")}</p></article>)}</div></>}
 
       {view === "profile" && <form className="panel form" onSubmit={saveProfile}>
         <h3>Perfil profissional obrigatório</h3>
