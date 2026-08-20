@@ -27,6 +27,20 @@ jobs:
 
   api:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: career_ci
+          POSTGRES_USER: career_ci
+          POSTGRES_PASSWORD: career_ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U career_ci -d career_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -37,6 +51,11 @@ jobs:
       - run: pip install -e "apps/api[dev]"
       - run: pytest apps/api/tests -q
       - run: python -m compileall -q apps/api/src apps/api/migrations
+      - name: Executar migrações em PostgreSQL real
+        working-directory: apps/api
+        env:
+          DATABASE_URL: postgresql+asyncpg://career_ci:career_ci_password@127.0.0.1:5432/career_ci
+        run: alembic upgrade head
 
   containers:
     runs-on: ubuntu-latest
