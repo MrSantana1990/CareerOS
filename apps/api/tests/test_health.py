@@ -13,4 +13,5 @@ def test_safety_defaults() -> None:
     data = TestClient(app).get("/api/v1/system/status").json()
     assert data["auto_apply_enabled"] is False
     assert "gupy" in data["blocked_platforms"]
-
+    assert data["product_name"] == "HelpSystem Carreira"
+    assert data["saas_ready"] is True
