@@ -66,6 +66,9 @@ jobs:
           POSTGRES_PASSWORD: validation-postgres
           REDIS_PASSWORD: validation-redis
           ADMIN_API_TOKEN: validation-token-with-at-least-32-characters
+          PORTAL_LOGIN_EMAIL: ci@example.com
+          PORTAL_PASSWORD_HASH: pbkdf2-sha256$310000$c2FsdA$aGFzaA
+          PORTAL_SESSION_SECRET: validation-session-secret-with-at-least-32-characters
         run: docker compose -f deploy/vps/docker-compose.yml config --quiet
       - name: Construir API
         run: docker build -t helpsystem-carreira-api:ci apps/api
