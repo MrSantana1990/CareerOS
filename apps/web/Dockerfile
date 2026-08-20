@@ -12,6 +12,8 @@ RUN pnpm install --filter @careeros/web... --no-frozen-lockfile
 COPY apps/web apps/web
 RUN pnpm --dir apps/web build
 FROM node:22-alpine
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
 COPY --from=build /workspace/apps/web/.next/standalone ./
 COPY --from=build /workspace/apps/web/.next/static ./apps/web/.next/static
 WORKDIR /apps/web

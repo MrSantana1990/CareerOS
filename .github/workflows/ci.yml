@@ -76,3 +76,12 @@ jobs:
           --build-arg AUTOMATION_HOST_URL=http://127.0.0.1:8765
           -f apps/web/Dockerfile
           -t helpsystem-carreira-web:ci .
+      - name: Validar escuta HTTP do painel
+        run: |
+          docker run --rm -d --name carreira-web-ci -p 127.0.0.1:18093:3000 helpsystem-carreira-web:ci
+          for attempt in {1..20}; do
+            curl --fail --silent http://127.0.0.1:18093/ >/dev/null && exit 0
+            sleep 1
+          done
+          docker logs carreira-web-ci
+          exit 1
