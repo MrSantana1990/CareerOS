@@ -93,11 +93,12 @@ services:
       start_period: 20s
     restart: unless-stopped
     security_opt: ["no-new-privileges:true"]
-    networks: [private]
+    networks: [private, edge]
 
 networks:
   private:
     internal: true
+  edge:
 
 volumes:
   postgres_data:
