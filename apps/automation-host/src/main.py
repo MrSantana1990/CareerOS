@@ -556,6 +556,7 @@ async def automation_run(request: RunRequest) -> None:
     except asyncio.CancelledError:
         update(status="stopped", platform=None, role=None, message="Automação interrompida pelo usuário.")
         event("AUTOMATION_STOPPED")
+        raise
 
 
 async def inspect_application_queue(request: PrepareRequest) -> None:
@@ -1439,7 +1440,13 @@ async def start_run(request: RunRequest) -> dict[str, object]:
 
 @app.post("/stop")
 async def stop_run() -> dict[str, object]:
+    global run_task
     if run_task and not run_task.done():
         run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
+    run_task = None
     update(status="stopped", message="Parada solicitada pelo usuário.")
     return state
