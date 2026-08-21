@@ -2,24 +2,20 @@
 
 ## Entregue
 
-- Fundação monorepo, Docker, API, worker e observabilidade.
-- Perfil profissional e currículo.
-- Chrome persistente e Playwright assistido.
-- Busca, análise, score, fila e feedback de candidaturas.
-- IA local para respostas fundamentadas.
-- Gmail, classificação de recrutamento e rascunhos.
-- Google Calendar com deduplicação.
-- Validação de questionários e bloqueio de rastreadores.
-- Painel responsivo acessível na rede local.
+- Fase 0 — inventário, arquitetura VPS-first, análise de lacunas e backup.
+- Fase 1 — vagas e fontes normalizadas, deduplicação, Score V2 explicável, hard blocks, máquina de estados, eventos imutáveis, worker idempotente e flags seguras.
+- Fundação — monorepo, Docker Compose, API, PostgreSQL, Redis, worker e observabilidade.
+- Produto — login próprio, PWA mobile-first, perfil, competências, currículo versionado, regras e Caixa de Decisões.
+- Integrações — Gmail e Google Calendar em serviço privado na VPS.
 
-## Próximas evoluções
+## Próximas fases
 
-1. Testes E2E com páginas simuladas para cada layout.
-2. Persistir domínio completo no PostgreSQL, mantendo migração do runtime JSON.
-3. Autenticação local e HTTPS para acesso por celular.
-4. Alertas push/PWA e resumo diário.
-5. Métricas de conversão por fonte, cargo, região e currículo.
-6. Versionamento de seletores e replay seguro de impedimentos.
-7. Criptografia e política configurável de retenção local.
+1. Fase 2 — adapters autorizados para fontes estruturadas, normalização e ingestão contínua no Core.
+2. Fase 3 — Resume Router, Answer Memory aprovada, candidatura assistida por e-mail/ATS e confirmação comprovada.
+3. Fase 4 — correlação Gmail/Agenda, follow-up e notificações push.
+4. Fase 5 — executor Playwright isolado, seleção versionada e intervenção humana para CAPTCHA/MFA.
+5. Fase 6 — analytics de conversão, riscos, recomendações e preparação comercial SaaS.
 
-Plataformas externas mudam frequentemente; evolução de conectores deve permanecer isolada, auditável e reversível.
+## Regra de evolução
+
+Cada fase começa com backup, usa migrations aditivas, nasce desligada por feature flag e só chega à produção após CI, migration real, health checks e smoke tests. Plataformas externas mudam frequentemente; conectores devem permanecer isolados, auditáveis e reversíveis.
