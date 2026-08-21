@@ -24,6 +24,18 @@ export async function createSession(email: string, secret: string): Promise<stri
   return `${payload}.${await hmac(payload, secret)}`;
 }
 
+export async function recoveryCode(email: string, secret: string, bucket = Math.floor(Date.now() / 300_000)): Promise<string> {
+  const signature = await hmac(`${email}:${bucket}:recovery`, secret);
+  return signature.replaceAll("-", "A").replaceAll("_", "B").slice(0, 8).toUpperCase();
+}
+
+export async function verifyRecoveryCode(email: string, code: string, secret: string): Promise<boolean> {
+  const normalized = code.trim().toUpperCase();
+  const bucket = Math.floor(Date.now() / 300_000);
+  return normalized === await recoveryCode(email, secret, bucket)
+    || normalized === await recoveryCode(email, secret, bucket - 1);
+}
+
 export async function validSession(value: string | undefined, secret: string): Promise<boolean> {
   if (!value || !secret) return false;
   const [payload, signature, extra] = value.split(".");

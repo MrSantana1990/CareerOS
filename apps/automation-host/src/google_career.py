@@ -51,6 +51,21 @@ def create_application_email_draft(token_path: Path, recipient: str, subject: st
     return {"draft_id": draft["id"]}
 
 
+def send_security_code(token_path: Path, recipient: str, code: str) -> dict:
+    credentials = _credentials(token_path)
+    gmail = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+    message = EmailMessage()
+    message["To"] = recipient
+    message["Subject"] = "Código de acesso — HelpSystem Carreira"
+    message.set_content(
+        "Use este código para entrar no HelpSystem Carreira:\n\n"
+        f"{code}\n\nEle expira em 10 minutos. Se você não solicitou, ignore este e-mail."
+    )
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    sent = gmail.users().messages().send(userId="me", body={"raw": raw}).execute()
+    return {"message_id": sent["id"]}
+
+
 def _headers(payload: dict) -> dict[str, str]:
     return {item.get("name", "").lower(): item.get("value", "") for item in payload.get("headers", [])}
 

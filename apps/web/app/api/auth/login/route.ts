@@ -15,7 +15,7 @@ export async function POST(request: NextRequest) {
   if (!valid) return NextResponse.json({ message: "E-mail ou senha inválidos." }, { status: 401 });
   const response = NextResponse.json({ ok: true });
   response.cookies.set(SESSION_COOKIE, await createSession(email, sessionSecret), {
-    httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", path: "/", maxAge: 8 * 60 * 60,
+    httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: 8 * 60 * 60,
   });
   return response;
 }

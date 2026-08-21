@@ -19,3 +19,9 @@ def test_sensitive_blockers_are_reported_for_human_intervention():
     assert 'application, "UNKNOWN_FIELD"' in source
     assert 'application, "SUBMISSION_UNCONFIRMED"' in source
     assert "O sistema nunca tenta contorná-lo" in source
+
+
+def test_security_code_delivery_requires_internal_bearer_token():
+    source = (Path(__file__).parents[1] / "src" / "main.py").read_text(encoding="utf-8")
+    assert '@app.post("/google/security-code")' in source
+    assert 'authorization != f"Bearer {CAREER_ADMIN_TOKEN}"' in source

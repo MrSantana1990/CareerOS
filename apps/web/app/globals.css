@@ -90,6 +90,28 @@
   opacity: 0.6;
   cursor: wait;
 }
+.password-field {
+  position: relative;
+}
+.password-field input {
+  padding-right: 88px;
+}
+.login-card .password-toggle {
+  position: absolute;
+  right: 7px;
+  top: 7px;
+  min-height: 36px;
+  padding: 0 10px;
+  color: #8ee7e2;
+  background: #102b3c;
+  font-size: 12px;
+}
+.login-card .login-link {
+  min-height: 44px;
+  color: #8ee7e2;
+  background: transparent;
+  border: 1px solid #2a485e;
+}
 .login-card small {
   display: block;
   margin-top: 20px;
