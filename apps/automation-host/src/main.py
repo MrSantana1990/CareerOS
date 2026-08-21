@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import BrowserContext, Frame, Page, Playwright, async_playwright
 
 from .ats_detection import ATSMatch, detect_ats
+from .hard_blocks import assess_hard_blocks, extract_salary_brl
 from .url_policy import authenticated_application_url
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -413,15 +414,6 @@ def geography_priority(item: dict) -> int:
     return 4
 
 
-def extract_salary_brl(text: str) -> int | None:
-    values: list[int] = []
-    for match in re.finditer(r"R\$\s*([\d.]+)(?:,\d{2})?", text, re.IGNORECASE):
-        raw = match.group(1).replace(".", "")
-        if raw.isdigit() and 1000 <= int(raw) <= 100000:
-            values.append(int(raw))
-    return min(values) if values else None
-
-
 def opportunity_feedback(title: str, body: str, settings: AutomationSettings) -> dict[str, object]:
     text = f"{title} {body}".lower()
     salary = extract_salary_brl(body)
@@ -441,7 +433,17 @@ def opportunity_feedback(title: str, body: str, settings: AutomationSettings) ->
     else:
         recommendation = "STANDARD"
         reason = "Avaliar aderência técnica, modalidade, benefícios e remuneração em conjunto."
-    return {"region": region, "salary_brl": salary, "recommendation": recommendation, "feedback": reason}
+    hard_block_result = assess_hard_blocks(text, salary)
+    if hard_block_result.risks:
+        reason += f" Atenção: {', '.join(hard_block_result.risks)}."
+    return {
+        "region": region,
+        "salary_brl": salary,
+        "recommendation": recommendation,
+        "feedback": reason,
+        "blocks": hard_block_result.blocks,
+        "risks": hard_block_result.risks,
+    }
 
 
 def environment_auto_apply_enabled() -> bool:
@@ -662,6 +664,9 @@ async def inspect_application_queue(request: PrepareRequest) -> None:
             elif "gupy.io" in current_url or "gupy.io" in body.lower():
                 application["status"] = "BLOCKED"
                 application["reason"] = "Ignorada: plataforma bloqueada pelo usuário."
+            elif application.get("blocks"):
+                application["status"] = "BLOCKED"
+                application["reason"] = f"Bloqueada: {', '.join(application['blocks'])}."
             elif INTERVENTION_PATTERNS["MFA"].search(body):
                 application["status"] = "MANUAL_REQUIRED"
                 application["reason"] = "Confirmação em duas etapas necessária."
@@ -1016,6 +1021,11 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 continue
             body = (await page.locator("body").inner_text())[:100_000]
             application.update(opportunity_feedback(application["title"], body, settings))
+            if application.get("blocks"):
+                application["status"] = "BLOCKED"
+                application["reason"] = f"Bloqueada: {', '.join(application['blocks'])}."
+                remember_layout(application, "hard_block", {"blocks": application["blocks"]})
+                continue
             if re.search(r"n[aã]o aceita mais candidaturas|vaga (?:foi )?encerrada|processo seletivo encerrado|no longer accepting applications|job is no longer available", body, re.IGNORECASE):
                 application["status"] = "CLOSED"
                 application["reason"] = "Vaga encerrada: a plataforma não aceita mais candidaturas."
