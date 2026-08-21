@@ -312,6 +312,14 @@ def normalized_tokens(value: str) -> set[str]:
     }
 
 
+def authenticated_application_url(value: str) -> str:
+    """Use the LinkedIn host covered by the authenticated session cookie."""
+    parsed = urlparse(value)
+    if parsed.netloc.lower() in {"br.linkedin.com", "linkedin.com"}:
+        return parsed._replace(netloc="www.linkedin.com").geturl()
+    return value
+
+
 def calculate_match(job: dict, profile: ProfessionalProfile) -> tuple[int, list[str], list[str]]:
     title = str(job.get("title", ""))
     role = str(job.get("search_role", ""))
@@ -598,7 +606,7 @@ async def inspect_application_queue(request: PrepareRequest) -> None:
             "reason": "",
         }
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            await page.goto(authenticated_application_url(url), wait_until="domcontentloaded", timeout=60_000)
             await page.wait_for_timeout(2500)
             dismissed = await dismiss_overlays(page)
             current_url = page.url.lower()
@@ -944,7 +952,7 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
         update(status="applying", platform=application.get("source"), role=application.get("title"),
                message=f"Candidatura {position}/{total}: abrindo vaga.")
         try:
-            await page.goto(application["job_url"], wait_until="commit", timeout=35_000)
+            await page.goto(authenticated_application_url(application["job_url"]), wait_until="commit", timeout=35_000)
             await page.wait_for_timeout(2000)
             if "gupy.io" in page.url.lower():
                 application["status"] = "BLOCKED"
