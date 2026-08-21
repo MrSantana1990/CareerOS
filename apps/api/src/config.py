@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     auto_apply_enabled: bool = False
     auto_apply_safety_acknowledged: bool = False
+    auto_discovery_enabled: bool = False
+    auto_score_enabled: bool = False
+    auto_email_apply_enabled: bool = False
+    auto_browser_apply_enabled: bool = False
+    auto_followup_enabled: bool = False
+    auto_calendar_enabled: bool = False
+    push_notifications_enabled: bool = False
     minimum_match_score: int = Field(default=75, ge=0, le=100)
     daily_application_target: int = Field(default=20, ge=1, le=100)
     admin_api_token: str = ""
