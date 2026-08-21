@@ -19,8 +19,9 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 from .google_career import connection_status, create_calendar_event, create_reply_draft, mark_questionnaire_complete, scan_recruitment_mail
 
-ROOT = Path(__file__).resolve().parents[3]
-RUNTIME = Path(os.getenv("CAREER_RUNTIME", str(ROOT / ".runtime")))
+runtime_override = os.getenv("CAREER_RUNTIME")
+ROOT = Path(__file__).resolve().parents[3] if not runtime_override else Path("/app")
+RUNTIME = Path(runtime_override) if runtime_override else ROOT / ".runtime"
 PROFILE = RUNTIME / "browser-profiles" / "default"
 RESULTS = RUNTIME / "jobs.json"
 LOGS = RUNTIME / "automation-events.jsonl"
