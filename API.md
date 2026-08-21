@@ -25,12 +25,18 @@
 
 Swagger: `http://localhost:8765/docs`.
 
-## API de fundação — porta 8001
+## API Core — porta 8000
 
 - `GET /health/live`
 - `GET /health/ready`
 - `GET /api/v1/system/status`
+- `POST /api/v1/jobs` — ingere ou deduplica uma vaga
+- `GET /api/v1/jobs` — lista vagas e último score
+- `POST /api/v1/jobs/{job_id}/score` — calcula e persiste o Score V2
+- `POST /api/v1/applications/{application_id}/transition` — aplica transição válida e registra evento imutável
 - `GET /metrics`
 - Swagger em `/docs`
+
+As rotas de domínio exigem o token administrativo no servidor. O navegador usa o BFF do portal e não recebe esse segredo.
 
 O dashboard usa o rewrite `/agent/:path*` para acessar o host sem expor URLs diferentes ao usuário.

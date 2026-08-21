@@ -10,13 +10,13 @@ A fundação é aproveitável; o projeto não deve ser reconstruído. A lacuna p
 
 | Prioridade | Lacuna | Impacto | Fase | Resposta |
 |---|---|---|---|---|
-| P0 | Modelo de vaga incompleto | impede conectores | 1 | migration aditiva |
-| P0 | Score V2 não persistido | decisão inconsistente | 1 | motor testado |
-| P0 | Estados/eventos ausentes | pouca rastreabilidade | 1 | eventos imutáveis |
-| P0 | Worker sem tarefas de negócio | não opera continuamente | 1 | jobs idempotentes |
-| P0 | Regras não governam todo fluxo | bloqueios podem ser ignorados | 1 | avaliador único |
+| Concluída | Modelo de vaga incompleto | resolvido na `0005` | 1 | migration aditiva |
+| Concluída | Score V2 não persistido | motor e upsert entregues | 1 | motor testado |
+| Concluída | Estados/eventos ausentes | pipeline append-only entregue | 1 | eventos imutáveis |
+| Concluída | Worker sem tarefas de negócio | score idempotente entregue | 1 | flag desligada |
+| Concluída | Regras não governam o score | avaliador único entregue | 1 | hard blocks |
 | P1 | Sem adapters | zero vagas no Core | 2 | Greenhouse/Lever/Ashby |
-| P1 | Deduplicação incompleta | risco de reaplicação | 1/2 | fingerprint + fontes |
+| Concluída | Deduplicação do Core | fingerprint + fontes entregues | 1 | adapters na Fase 2 |
 | P1 | Resume Router e Answer Memory ausentes | personalização insegura | 3 | famílias/respostas aprovadas |
 | P1 | Confirmação incompleta | falso positivo de envio | 3 | provider ID/evidência |
 | P1 | Gmail sem correlação completa | pipeline manual | 4 | correlacionador/eventos |
@@ -63,6 +63,6 @@ A fundação é aproveitável; o projeto não deve ser reconstruído. A lacuna p
 - flags novas começam desligadas;
 - produção somente após CI, migration, health e smoke tests.
 
-## Fase 0 concluída quando
+## Fase 1 concluída quando
 
-Inventário, arquitetura e gaps estiverem publicados; backup protegido existir; nenhuma feature, migration ou dado de produção tiver sido alterado.
+Migration `0005`, Score V2, deduplicação, máquina de estados, eventos imutáveis, worker idempotente e flags desligadas estiverem publicados; CI, health checks e preservação dos dados forem confirmados.
