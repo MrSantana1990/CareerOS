@@ -724,6 +724,47 @@ async def ai_fill_simple_questions(page: Page, profile: ProfessionalProfile, app
     questions = [q for q in questions if not re.search(r"report|denunci|newsletter|search", f"{q.get('name','')} {q.get('question','')}", re.I)]
     if not questions:
         return {"filled": [], "unresolved": []}
+    filled, unresolved = [], []
+    remaining = []
+    for question in questions:
+        question_tokens = normalized_tokens(str(question.get("question", "")))
+        best_answer, best_score, best_evidence = "", 0.0, ""
+        for saved_question, saved_answer in profile.approved_answers.items():
+            saved_tokens = normalized_tokens(saved_question)
+            union = question_tokens | saved_tokens
+            score = len(question_tokens & saved_tokens) / len(union) if union else 0.0
+            if score > best_score:
+                best_answer, best_score = str(saved_answer).strip(), score
+                best_evidence = f"Memória aprovada: {saved_question}"
+        if best_answer and best_score >= 0.55:
+            name = str(question.get("name", ""))
+            fields = page.locator(f'[name="{name}"]') if name else page.locator("__missing__")
+            matched = False
+            for index in range(await fields.count()):
+                field = fields.nth(index)
+                try:
+                    field_type = await field.get_attribute("type") or ""
+                    if field_type in {"radio", "checkbox"}:
+                        field_value = await field.get_attribute("value") or ""
+                        field_id = await field.get_attribute("id") or ""
+                        label = page.locator(f'label[for="{field_id}"]')
+                        label_text = await label.inner_text() if await label.count() else ""
+                        if best_answer.lower() in {field_value.lower(), label_text.strip().lower()}:
+                            await field.check()
+                            matched = True
+                    elif await field.is_editable():
+                        await field.fill(best_answer[: question.get("maxLength") or 450])
+                        matched = True
+                except Exception:
+                    continue
+            if matched:
+                filled.append({"name": name, "answer": best_answer, "evidence": best_evidence})
+                continue
+        remaining.append(question)
+    questions = remaining
+    if not questions:
+        event("APPROVED_MEMORY_USED", application_id=application.get("id"), filled=len(filled))
+        return {"filled": filled, "unresolved": []}
     system = (
         "Você é um redator profissional brasileiro preenchendo um formulário de emprego em nome do candidato. "
         "Leia a pergunta inteira, as opções, o cargo, o perfil e o currículo antes de responder. Use SOMENTE fatos comprovados. "
@@ -739,10 +780,14 @@ async def ai_fill_simple_questions(page: Page, profile: ProfessionalProfile, app
     payload = {"model": "local", "temperature": 0.0, "max_tokens": 1000,
                "messages": [{"role": "system", "content": system},
                             {"role": "user", "content": json.dumps(payload_data, ensure_ascii=False)}]}
-    result = await asyncio.to_thread(_http_json, f"{LOCAL_AI_URL}/chat/completions", payload, 90)
+    try:
+        result = await asyncio.to_thread(_http_json, f"{LOCAL_AI_URL}/chat/completions", payload, 90)
+    except (URLError, TimeoutError, OSError, ValueError):
+        unresolved.extend(str(question.get("name", "")) for question in questions)
+        event("LOCAL_AI_UNAVAILABLE", application_id=application.get("id"), unresolved=len(unresolved))
+        return {"filled": filled, "unresolved": unresolved}
     content = result["choices"][0]["message"]["content"]
     parsed = json.loads(re.search(r"\{.*\}", content, re.DOTALL).group(0))
-    filled, unresolved = [], []
     for answer in parsed.get("answers", []):
         name, value = str(answer.get("name", "")), str(answer.get("answer", "")).strip()
         evidence = str(answer.get("evidence", "")).strip()
@@ -928,6 +973,15 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                     page.url,
                 )
                 continue
+            if re.search(r"entre para se candidatar|fa[cç]a login para se candidatar|sign in to apply|join linkedin", body, re.IGNORECASE):
+                application["status"] = "MANUAL_REQUIRED"
+                application["reason"] = "A plataforma exige login antes da candidatura."
+                await report_intervention(
+                    application, "LOGIN_REQUIRED", "Entre na plataforma de vagas",
+                    "Faça login na plataforma e retome a automação. A senha não é armazenada pelo HelpSystem.",
+                    page.url,
+                )
+                continue
             if INTERVENTION_PATTERNS["CAPTCHA"].search(body):
                 application["status"] = "MANUAL_REQUIRED"
                 application["reason"] = "CAPTCHA detectado."
@@ -976,8 +1030,7 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                     break
             can_submit = visible_submit is not None
             live_allowed = (
-                settings.auto_apply_enabled
-                and request.confirm_live_submission
+                request.confirm_live_submission
                 and environment_auto_apply_enabled()
             )
             if can_submit and live_allowed:

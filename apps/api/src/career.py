@@ -564,7 +564,12 @@ async def get_profile(slug: str = Depends(require_admin)) -> dict[str, Any]:
                COALESCE(p.salary_expectation, '') AS salary_expectation,
                COALESCE(p.work_models, '[]'::jsonb) AS work_models,
                COALESCE(p.target_roles, '[]'::jsonb) AS target_roles,
-               COALESCE(p.approved_answers, '{}'::jsonb) AS approved_answers,
+               COALESCE(p.approved_answers, '{}'::jsonb) || COALESCE((
+                 SELECT jsonb_object_agg(q.normalized_question, q.approved_answer)
+                 FROM application_questions q
+                 WHERE q.organization_id=:organization_id AND q.verified=true
+                   AND q.approved_answer IS NOT NULL
+               ), '{}'::jsonb) AS approved_answers,
                COALESCE((SELECT jsonb_agg(s.name ORDER BY s.name) FROM skills s
                          WHERE s.organization_id = :organization_id AND s.deleted_at IS NULL), '[]'::jsonb) AS skills,
                rv.storage_key AS resume_path, r.name AS resume_name

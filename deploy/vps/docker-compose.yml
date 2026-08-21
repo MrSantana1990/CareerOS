@@ -115,6 +115,7 @@ services:
       EXECUTOR_ID: "vps-integrations"
       BROWSER_HEADLESS: "true"
       BROWSER_CHANNEL: "chromium"
+      AUTO_APPLY_ENABLED: "true"
     volumes:
       - integrations_data:/data/runtime
       - resume_data:/data/resumes:ro
