@@ -15,6 +15,8 @@ from urllib.parse import quote_plus, urljoin, urlparse
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
+
+from .url_policy import authenticated_application_url
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 from .google_career import (connection_status, create_application_email_draft,
@@ -598,7 +600,7 @@ async def inspect_application_queue(request: PrepareRequest) -> None:
             "reason": "",
         }
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            await page.goto(authenticated_application_url(url), wait_until="domcontentloaded", timeout=60_000)
             await page.wait_for_timeout(2500)
             dismissed = await dismiss_overlays(page)
             current_url = page.url.lower()
@@ -944,7 +946,7 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
         update(status="applying", platform=application.get("source"), role=application.get("title"),
                message=f"Candidatura {position}/{total}: abrindo vaga.")
         try:
-            await page.goto(application["job_url"], wait_until="commit", timeout=35_000)
+            await page.goto(authenticated_application_url(application["job_url"]), wait_until="commit", timeout=35_000)
             await page.wait_for_timeout(2000)
             if "gupy.io" in page.url.lower():
                 application["status"] = "BLOCKED"
