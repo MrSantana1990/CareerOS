@@ -14,8 +14,9 @@ from urllib.parse import quote_plus, urljoin, urlparse
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
+from playwright.async_api import BrowserContext, Frame, Page, Playwright, async_playwright
 
+from .ats_detection import ATSMatch, detect_ats
 from .url_policy import authenticated_application_url
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -36,6 +37,7 @@ RESUMES = RUNTIME / "resumes"
 SCREENSHOTS = RUNTIME / "screenshots"
 SETTINGS_DATA = RUNTIME / "automation-settings.json"
 LAYOUT_KNOWLEDGE = RUNTIME / "layout-knowledge.json"
+SUGGESTED_SOURCES_CACHE = RUNTIME / "suggested-sources.json"
 AI_DECISIONS = RUNTIME / "ai-decisions.jsonl"
 GOOGLE_TOKEN = RUNTIME / "google" / "google-token.json"
 GOOGLE_INBOX = RUNTIME / "google" / "career-mail.json"
@@ -93,6 +95,48 @@ async def report_intervention(application: dict[str, object], reason: str, title
     except (URLError, TimeoutError, OSError) as exc:
         event("INTERVENTION_REPORT_FAILED", application_id=legacy_id, reason=reason,
               error=type(exc).__name__)
+
+
+async def suggest_source_connection(ats_match: ATSMatch) -> None:
+    """Sugere ao Core o cadastro de uma fonte estruturada (Greenhouse/Lever/
+    Ashby) descoberta via navegador. Sempre com enabled=False — o scheduler
+    (apps/worker/src/scheduler.py) só executa fontes com enabled=true, então
+    isso nunca ativa nada sozinho; fica pendente de aprovação humana."""
+    if not CAREER_ADMIN_TOKEN:
+        event("ATS_SOURCE_SUGGESTION_SKIPPED", reason="missing_admin_token")
+        return
+    already = set(load_json(SUGGESTED_SOURCES_CACHE, []))
+    key = f"{ats_match.adapter}:{ats_match.account_key}"
+    if key in already:
+        return
+    payload = {
+        "adapter": ats_match.adapter,
+        "account_key": ats_match.account_key,
+        "company_name": ats_match.account_key,
+        "enabled": False,
+        "maximum_jobs": 200,
+        "cadence_minutes": 360,
+    }
+
+    def send() -> dict:
+        request = Request(
+            CAREER_API_URL + "/api/v1/sources",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    try:
+        result = await asyncio.to_thread(send)
+        save_json(SUGGESTED_SOURCES_CACHE, sorted(already | {key}))
+        event("ATS_SOURCE_SUGGESTED", adapter=ats_match.adapter,
+              account_key=ats_match.account_key, source_id=result.get("id"))
+    except (URLError, TimeoutError, OSError) as exc:
+        event("ATS_SOURCE_SUGGESTION_FAILED", adapter=ats_match.adapter,
+              account_key=ats_match.account_key, error=type(exc).__name__)
+
 
 PLATFORMS = {
     "InfoJobs": "https://www.infojobs.com.br/",
@@ -630,16 +674,14 @@ async def inspect_application_queue(request: PrepareRequest) -> None:
                     page.url,
                 )
             else:
-                apply_locator = page.get_by_role(
-                    "button",
-                    name=re.compile(r"candidat|inscrever|apply|tenho interesse", re.IGNORECASE),
-                )
-                apply_links = page.get_by_role(
-                    "link",
-                    name=re.compile(r"candidat|inscrever|apply|tenho interesse", re.IGNORECASE),
-                )
-                has_button = any([await apply_locator.nth(i).is_visible() for i in range(min(await apply_locator.count(), 8))])
-                has_link = any([await apply_links.nth(i).is_visible() for i in range(min(await apply_links.count(), 8))])
+                cta_pattern = re.compile(r"candidat|inscrever|apply|tenho interesse", re.IGNORECASE)
+                has_button = False
+                has_link = False
+                for root in await search_roots(page):
+                    apply_locator = root.get_by_role("button", name=cta_pattern)
+                    apply_links = root.get_by_role("link", name=cta_pattern)
+                    has_button = has_button or any([await apply_locator.nth(i).is_visible() for i in range(min(await apply_locator.count(), 8))])
+                    has_link = has_link or any([await apply_links.nth(i).is_visible() for i in range(min(await apply_links.count(), 8))])
                 application["status"] = "READY_TO_PREPARE" if has_button or has_link else "MANUAL_REQUIRED"
                 application["dismissed_overlays"] = dismissed
                 application["reason"] = (
@@ -664,7 +706,7 @@ async def inspect_application_queue(request: PrepareRequest) -> None:
     )
 
 
-async def fill_known_fields(page: Page, profile: ProfessionalProfile) -> list[str]:
+async def fill_known_fields(root: Page | Frame, profile: ProfessionalProfile) -> list[str]:
     values = {
         r"nome|name": profile.full_name,
         r"e-?mail": profile.email,
@@ -678,7 +720,7 @@ async def fill_known_fields(page: Page, profile: ProfessionalProfile) -> list[st
     for pattern, value in values.items():
         if not value:
             continue
-        locator = page.get_by_label(re.compile(pattern, re.IGNORECASE))
+        locator = root.get_by_label(re.compile(pattern, re.IGNORECASE))
         count = min(await locator.count(), 3)
         for index in range(count):
             field = locator.nth(index)
@@ -690,7 +732,7 @@ async def fill_known_fields(page: Page, profile: ProfessionalProfile) -> list[st
                 continue
     resume = Path(profile.resume_path)
     if resume.exists():
-        file_inputs = page.locator('input[type="file"]')
+        file_inputs = root.locator('input[type="file"]')
         for index in range(await file_inputs.count()):
             try:
                 await file_inputs.nth(index).set_input_files(str(resume))
@@ -700,8 +742,8 @@ async def fill_known_fields(page: Page, profile: ProfessionalProfile) -> list[st
     return filled
 
 
-async def ai_fill_simple_questions(page: Page, profile: ProfessionalProfile, application: dict) -> dict[str, object]:
-    questions = await page.locator("input[required], textarea[required], select[required]").evaluate_all(
+async def ai_fill_simple_questions(root: Page | Frame, profile: ProfessionalProfile, application: dict) -> dict[str, object]:
+    questions = await root.locator("input[required], textarea[required], select[required]").evaluate_all(
         """els => els.filter(el => el.getClientRects().length && !el.disabled).map((el, index) => {
           let container = el.closest('fieldset, [role="group"], .form-group, .question, li');
           if (!container && (el.type === 'radio' || el.type === 'checkbox')) {
@@ -740,7 +782,7 @@ async def ai_fill_simple_questions(page: Page, profile: ProfessionalProfile, app
                 best_evidence = f"Memória aprovada: {saved_question}"
         if best_answer and best_score >= 0.55:
             name = str(question.get("name", ""))
-            fields = page.locator(f'[name="{name}"]') if name else page.locator("__missing__")
+            fields = root.locator(f'[name="{name}"]') if name else root.locator("__missing__")
             matched = False
             for index in range(await fields.count()):
                 field = fields.nth(index)
@@ -749,7 +791,7 @@ async def ai_fill_simple_questions(page: Page, profile: ProfessionalProfile, app
                     if field_type in {"radio", "checkbox"}:
                         field_value = await field.get_attribute("value") or ""
                         field_id = await field.get_attribute("id") or ""
-                        label = page.locator(f'label[for="{field_id}"]')
+                        label = root.locator(f'label[for="{field_id}"]')
                         label_text = await label.inner_text() if await label.count() else ""
                         if best_answer.lower() in {field_value.lower(), label_text.strip().lower()}:
                             await field.check()
@@ -801,7 +843,7 @@ async def ai_fill_simple_questions(page: Page, profile: ProfessionalProfile, app
         max_length = question_meta.get("maxLength") or 450
         if len(value) > max_length:
             value = value[:max_length].rsplit(" ", 1)[0].rstrip(" ,;:") + "."
-        fields = page.locator(f'[name="{name}"]') if name else page.locator("__missing__")
+        fields = root.locator(f'[name="{name}"]') if name else root.locator("__missing__")
         matched = False
         for index in range(await fields.count()):
             field = fields.nth(index)
@@ -810,7 +852,7 @@ async def ai_fill_simple_questions(page: Page, profile: ProfessionalProfile, app
                 if field_type in {"radio", "checkbox"}:
                     field_value = await field.get_attribute("value") or ""
                     field_id = await field.get_attribute("id") or ""
-                    label = page.locator(f'label[for="{field_id}"]')
+                    label = root.locator(f'label[for="{field_id}"]')
                     label_text = await label.inner_text() if await label.count() else ""
                     if value.lower() in {field_value.lower(), label_text.strip().lower()}:
                         await field.check()
@@ -828,8 +870,8 @@ async def ai_fill_simple_questions(page: Page, profile: ProfessionalProfile, app
     return {"filled": filled, "unresolved": unresolved}
 
 
-async def required_unknown_fields(page: Page) -> list[str]:
-    return await page.locator("input[required], textarea[required], select[required]").evaluate_all(
+async def required_unknown_fields(root: Page | Frame) -> list[str]:
+    return await root.locator("input[required], textarea[required], select[required]").evaluate_all(
         """els => els.filter(el => {
           if (el.type === 'hidden' || el.type === 'submit') return false;
           if (!el.isConnected || el.disabled || el.getClientRects().length === 0) return false;
@@ -865,28 +907,39 @@ async def dismiss_overlays(page: Page) -> list[str]:
     return dismissed
 
 
+async def search_roots(page: Page) -> list[Page | Frame]:
+    """Greenhouse/Lever/Ashby costumam embutir o formulário de candidatura
+    num <iframe>. Só incluímos frames como raiz de busca quando o host é um
+    ATS estruturado conhecido, para não alterar o comportamento em sites sem
+    iframe (LinkedIn, Indeed, Catho, InfoJobs, portais próprios)."""
+    if not detect_ats(page.url):
+        return [page]
+    return [page, *page.frames[1:]]
+
+
 async def click_first_visible(page: Page, pattern: str) -> bool:
     matcher = re.compile(pattern, re.IGNORECASE)
-    for role in ("button", "link"):
-        locator = page.get_by_role(role, name=matcher)
-        for index in range(min(await locator.count(), 8)):
+    for root in await search_roots(page):
+        for role in ("button", "link"):
+            locator = root.get_by_role(role, name=matcher)
+            for index in range(min(await locator.count(), 8)):
+                item = locator.nth(index)
+                try:
+                    if await item.is_visible() and await item.is_enabled():
+                        await item.click(timeout=8000)
+                        return True
+                except Exception:
+                    continue
+        # Alguns portais desenham o CTA em div/span sem semântica de botão.
+        locator = root.locator("button, a, [role='button'], input[type='button'], input[type='submit']").filter(has_text=matcher)
+        for index in range(min(await locator.count(), 12)):
             item = locator.nth(index)
             try:
-                if await item.is_visible() and await item.is_enabled():
+                if await item.is_visible():
                     await item.click(timeout=8000)
                     return True
             except Exception:
                 continue
-    # Alguns portais desenham o CTA em div/span sem semântica de botão.
-    locator = page.locator("button, a, [role='button'], input[type='button'], input[type='submit']").filter(has_text=matcher)
-    for index in range(min(await locator.count(), 12)):
-        item = locator.nth(index)
-        try:
-            if await item.is_visible():
-                await item.click(timeout=8000)
-                return True
-        except Exception:
-            continue
     return False
 
 
@@ -1029,15 +1082,25 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 application["reason"] = "Ignorada: plataforma bloqueada pelo usuÃ¡rio."
                 remember_layout(application, "blocked_platform", {"platform": "gupy"})
                 continue
-            filled = await fill_known_fields(page, profile)
-            ai_result = await ai_fill_simple_questions(page, profile, application)
-            unknown = await required_unknown_fields(page)
+            ats_match = detect_ats(page.url) or (detect_ats(action_href) if action_href else None)
+            application["detected_ats"] = ats_match.adapter if ats_match else None
+            application["detected_ats_account"] = ats_match.account_key if ats_match else None
+            if ats_match:
+                await suggest_source_connection(ats_match)
+            filled: list[str] = []
+            ai_filled: list[dict[str, object]] = []
+            unknown: list[str] = []
+            for root in await search_roots(page):
+                filled.extend(await fill_known_fields(root, profile))
+                ai_result = await ai_fill_simple_questions(root, profile, application)
+                ai_filled.extend(ai_result.get("filled", []))
+                unknown.extend(await required_unknown_fields(root))
             SCREENSHOTS.mkdir(parents=True, exist_ok=True)
             evidence = SCREENSHOTS / f"{application['id']}-prepared.png"
             await page.screenshot(path=str(evidence), full_page=True)
             application["evidence"] = str(evidence)
             application["filled_fields"] = filled
-            application["ai_answers"] = ai_result.get("filled", [])
+            application["ai_answers"] = ai_filled
             application["unknown_fields"] = unknown
             application["dismissed_overlays"] = dismissed
             if unknown:
@@ -1050,14 +1113,18 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                     page.url, {"fields": unknown[:20]},
                 )
                 continue
-            submit = page.get_by_role("button", name=re.compile(
+            submit_pattern = re.compile(
                 r"enviar candidatura|enviar meu curr[ií]culo|submit application|finalizar candidatura|confirmar candidatura|concluir candidatura",
                 re.IGNORECASE,
-            ))
+            )
             visible_submit = None
-            for index in range(min(await submit.count(), 5)):
-                if await submit.nth(index).is_visible() and await submit.nth(index).is_enabled():
-                    visible_submit = submit.nth(index)
+            for root in await search_roots(page):
+                submit = root.get_by_role("button", name=submit_pattern)
+                for index in range(min(await submit.count(), 5)):
+                    if await submit.nth(index).is_visible() and await submit.nth(index).is_enabled():
+                        visible_submit = submit.nth(index)
+                        break
+                if visible_submit is not None:
                     break
             can_submit = visible_submit is not None
             live_allowed = (
