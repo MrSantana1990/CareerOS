@@ -994,12 +994,25 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 )
                 continue
             dismissed = await dismiss_overlays(page)
+            pages_before_action = set(browser.pages)
             action_clicked = await click_first_visible(
                 page, r"quero me candidatar|candidatura f[aá]cil|candidatar(?:-se)?|inscrever|apply now|easy apply|tenho interesse"
             )
             if action_clicked:
                 await page.wait_for_timeout(1800)
+                opened_pages = [candidate for candidate in browser.pages if candidate not in pages_before_action]
+                if opened_pages:
+                    page = opened_pages[-1]
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=35_000)
+                    except Exception:
+                        pass
                 await dismiss_overlays(page)
+            if "gupy.io" in page.url.lower():
+                application["status"] = "BLOCKED"
+                application["reason"] = "Ignorada: plataforma bloqueada pelo usuÃ¡rio."
+                remember_layout(application, "blocked_platform", {"platform": "gupy"})
+                continue
             filled = await fill_known_fields(page, profile)
             ai_result = await ai_fill_simple_questions(page, profile, application)
             unknown = await required_unknown_fields(page)
