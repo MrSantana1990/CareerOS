@@ -20,7 +20,7 @@ from pypdf import PdfReader
 from .google_career import connection_status, create_calendar_event, create_reply_draft, mark_questionnaire_complete, scan_recruitment_mail
 
 ROOT = Path(__file__).resolve().parents[3]
-RUNTIME = ROOT / ".runtime"
+RUNTIME = Path(os.getenv("CAREER_RUNTIME", str(ROOT / ".runtime")))
 PROFILE = RUNTIME / "browser-profiles" / "default"
 RESULTS = RUNTIME / "jobs.json"
 LOGS = RUNTIME / "automation-events.jsonl"
