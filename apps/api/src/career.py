@@ -96,6 +96,20 @@ class CommunicationBatch(BaseModel):
     items: list[CommunicationInput] = Field(max_length=500)
 
 
+class InterventionInput(BaseModel):
+    application_id: UUID | None = None
+    executor_id: str = Field(min_length=2, max_length=100)
+    reason: Literal["CAPTCHA", "MFA", "LOGIN", "UNKNOWN_FIELD", "SUBMISSION_UNCONFIRMED", "LAYOUT_CHANGED"]
+    title: str = Field(min_length=3, max_length=240)
+    instructions: str = Field(min_length=3, max_length=2000)
+    page_url: str | None = Field(default=None, max_length=1000)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class InterventionResolution(BaseModel):
+    resolution: Literal["RESOLVED", "SKIPPED", "CANCELLED"]
+
+
 class SourceConnectionInput(BaseModel):
     adapter: Literal["GREENHOUSE", "LEVER", "ASHBY"]
     account_key: str = Field(min_length=2, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")
@@ -861,3 +875,77 @@ async def evaluate_followups(slug: str = Depends(require_admin)) -> dict[str, in
             created += int(result.first() is not None)
         await session.commit()
     return {"eligible": len(due), "notifications": created, "sent": 0}
+
+
+@router.post("/interventions")
+async def create_intervention(payload: InterventionInput,
+                              slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        existing = (await session.execute(text("""
+            SELECT id, reason, status, title, instructions, page_url, created_at
+            FROM human_interventions
+            WHERE organization_id=:organization_id AND executor_id=:executor_id
+              AND reason=:reason AND status='PENDING'
+              AND evidence->>'deduplication_key'=:deduplication_key
+            ORDER BY created_at DESC LIMIT 1
+        """), {"organization_id": org_id, "executor_id": payload.executor_id,
+                "reason": payload.reason,
+                "deduplication_key": str(payload.evidence.get("deduplication_key", ""))})).mappings().first()
+        if existing and payload.evidence.get("deduplication_key"):
+            return dict(existing)
+        row = (await session.execute(text("""
+            INSERT INTO human_interventions
+              (id, organization_id, application_id, executor_id, reason, title,
+               instructions, page_url, evidence)
+            VALUES (gen_random_uuid(), :organization_id, :application_id, :executor_id,
+                    :reason, :title, :instructions, :page_url, CAST(:evidence AS jsonb))
+            RETURNING id, reason, status, title, instructions, page_url, created_at
+        """), {**payload.model_dump(exclude={"evidence"}), "organization_id": org_id,
+                "evidence": json.dumps(payload.evidence)})).mappings().one()
+        await session.execute(text("""
+            INSERT INTO career_notifications
+              (id, organization_id, application_id, kind, title, body, priority,
+               deduplication_key)
+            VALUES (gen_random_uuid(), :organization_id, :application_id,
+                    'HUMAN_INTERVENTION', :title, :body, 'URGENT', :key)
+            ON CONFLICT (organization_id, deduplication_key) DO NOTHING
+        """), {"organization_id": org_id, "application_id": payload.application_id,
+                "title": payload.title, "body": payload.instructions,
+                "key": f"intervention:{row['id']}"})
+        await session.commit()
+    return dict(row)
+
+
+@router.get("/interventions")
+async def list_interventions(status: str = Query(default="PENDING"),
+                             slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        rows = (await session.execute(text("""
+            SELECT id, application_id, executor_id, reason, status, title,
+                   instructions, page_url, evidence, created_at, resolved_at, resolution
+            FROM human_interventions
+            WHERE organization_id=:organization_id AND (:status='ALL' OR status=:status)
+            ORDER BY CASE status WHEN 'PENDING' THEN 1 ELSE 2 END, created_at DESC LIMIT 100
+        """), {"organization_id": org_id, "status": status})).mappings()
+    return [dict(row) for row in rows]
+
+
+@router.post("/interventions/{intervention_id}/resolve")
+async def resolve_intervention(intervention_id: UUID, payload: InterventionResolution,
+                               slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        row = (await session.execute(text("""
+            UPDATE human_interventions SET status=:status, resolution=:resolution,
+              resolved_at=now(), updated_at=now()
+            WHERE id=:id AND organization_id=:organization_id AND status='PENDING'
+            RETURNING id, status, resolution, resolved_at
+        """), {"id": intervention_id, "organization_id": org_id,
+                "status": payload.resolution,
+                "resolution": payload.resolution})).mappings().first()
+        await session.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="Intervenção pendente não encontrada.")
+    return dict(row)

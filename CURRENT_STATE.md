@@ -85,3 +85,12 @@ As próximas fases devem usar migrations aditivas, manter volumes e `.env`, nunc
 - central de notificações disponível no portal e no celular;
 - follow-up apenas gera lembrete após sete dias sem resposta;
 - nenhum e-mail ou candidatura é enviado automaticamente.
+
+## Fase 5
+
+- intervenções humanas persistidas no PostgreSQL com executor, motivo, evidências e resolução;
+- deduplicação de alertas por candidatura legada e motivo;
+- CAPTCHA, MFA, campos desconhecidos e envio não confirmado interrompem o fluxo;
+- o executor não tenta resolver, contornar ou inventar respostas;
+- central móvel permite abrir a página, concluir ou ignorar com registro;
+- autoenvio e descoberta continuam desligados por padrão.

@@ -112,6 +112,7 @@ services:
       RESUME_STORAGE_DIR: /data/resumes
       CAREER_API_URL: http://api:8000
       ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:?Defina ADMIN_API_TOKEN}"
+      EXECUTOR_ID: "vps-integrations"
     volumes:
       - integrations_data:/data/runtime
       - resume_data:/data/resumes:ro

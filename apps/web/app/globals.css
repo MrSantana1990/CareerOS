@@ -446,7 +446,7 @@ body {
 .answer-list .badge { justify-self: start; }
 .answer-list p { margin: 0; }
 .answer-list small { color: var(--muted); }
-.topbar-actions{display:flex;align-items:center;gap:10px}.notification-button{border:1px solid var(--line);border-radius:9px;padding:10px 13px;background:#102638;color:#fff;cursor:pointer}.notification-button span{display:inline-grid;place-items:center;min-width:22px;height:22px;margin-left:6px;border-radius:99px;background:var(--accent);color:#06151d;font-weight:800}.notification-list{display:grid;gap:10px}.notification-list>button{display:grid;gap:7px;text-align:left;padding:15px;border:1px solid var(--line);border-radius:11px;background:#091722;color:#fff;cursor:pointer}.notification-list>button.urgent{border-color:#d55b68}.notification-list>button.high{border-color:#b88a3b}.notification-list>button.read{opacity:.58}.notification-list .badge{justify-self:start}.notification-list p{margin:0}.notification-list small{color:var(--muted)}
+.topbar-actions{display:flex;align-items:center;gap:10px}.notification-button,.intervention-button{border:1px solid var(--line);border-radius:9px;padding:10px 13px;background:#102638;color:#fff;cursor:pointer}.intervention-button{border-color:#ad7d39;background:#2a2116}.notification-button span,.intervention-button span{display:inline-grid;place-items:center;min-width:22px;height:22px;margin-left:6px;border-radius:99px;background:var(--accent);color:#06151d;font-weight:800}.intervention-button span{background:#f2b65d}.notification-list{display:grid;gap:10px}.notification-list>button{display:grid;gap:7px;text-align:left;padding:15px;border:1px solid var(--line);border-radius:11px;background:#091722;color:#fff;cursor:pointer}.notification-list>button.urgent{border-color:#d55b68}.notification-list>button.high{border-color:#b88a3b}.notification-list>button.read{opacity:.58}.notification-list .badge{justify-self:start}.notification-list p{margin:0}.notification-list small{color:var(--muted)}.intervention-list{display:grid;gap:12px}.intervention-card{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:18px;border:1px solid #76572d;border-radius:12px;background:linear-gradient(135deg,#171b1d,#251d13)}.intervention-card>div:first-child{display:grid;gap:8px}.intervention-card p{margin:0;color:var(--muted)}.intervention-card small{color:var(--muted)}.intervention-actions{display:flex;flex-wrap:wrap;gap:8px}.secondary-button{display:inline-flex;align-items:center;padding:10px 14px;border:1px solid var(--line);border-radius:9px;color:#fff;text-decoration:none;background:#102638}
 .form .readonly {
   opacity: 0.7;
 }
@@ -859,6 +859,31 @@ li {
   }
   .topbar .danger {
     display: none;
+  }
+  .topbar-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .notification-button,
+  .intervention-button {
+    min-height: 48px;
+  }
+  .intervention-card {
+    flex-direction: column;
+  }
+  .intervention-actions {
+    display: grid;
+    width: 100%;
+    grid-template-columns: 1fr 1fr;
+  }
+  .intervention-actions > * {
+    min-height: 48px;
+    justify-content: center;
+  }
+  .intervention-actions > :first-child:last-child,
+  .intervention-actions > :first-child:nth-last-child(3) {
+    grid-column: 1 / -1;
   }
   .hero-panel {
     align-items: flex-start;
