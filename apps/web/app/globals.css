@@ -11,6 +11,114 @@
     #030b13 100%
   );
 }
+
+.timeline-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 190px;
+  margin-top: 20px;
+  padding-top: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.timeline-chart > div {
+  display: flex;
+  flex: 1;
+  min-width: 3px;
+  height: 100%;
+  align-items: center;
+  justify-content: flex-end;
+  flex-direction: column;
+}
+
+.timeline-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  width: 100%;
+  height: calc(100% - 20px);
+}
+
+.timeline-bars span {
+  display: block;
+  flex: 1;
+  min-height: 3px;
+  border-radius: 5px 5px 0 0;
+}
+
+.timeline-bars .jobs,
+.timeline-legend .jobs {
+  background: linear-gradient(180deg, var(--accent), #087f75);
+}
+
+.timeline-bars .applications,
+.timeline-legend .applications {
+  background: #60a5fa;
+}
+
+.timeline-bars .responses,
+.timeline-legend .responses {
+  background: #fbbf24;
+}
+
+.timeline-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.timeline-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-legend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.timeline-chart small {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.goal-form {
+  align-content: start;
+}
+
+.goal-progress {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.goal-progress > div {
+  display: grid;
+  gap: 9px;
+}
+
+.goal-progress progress {
+  width: 100%;
+  height: 14px;
+  accent-color: var(--accent);
+}
+
+@media (max-width: 850px) {
+  .goal-progress {
+    grid-template-columns: 1fr;
+  }
+
+  .timeline-chart small {
+    display: none;
+  }
+}
 .login-card {
   width: min(100%, 430px);
   padding: 36px;
