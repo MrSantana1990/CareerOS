@@ -1,7 +1,7 @@
 from typing import Any, Literal
 from uuid import UUID
 from pathlib import Path
-from datetime import datetime
+from datetime import UTC, datetime
 import hashlib
 import json
 import os
@@ -875,6 +875,62 @@ async def evaluate_followups(slug: str = Depends(require_admin)) -> dict[str, in
             created += int(result.first() is not None)
         await session.commit()
     return {"eligible": len(due), "notifications": created, "sent": 0}
+
+
+@router.get("/analytics")
+async def career_analytics(slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Evidence-based operational funnel; empty samples never become recommendations."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        application_rows = (await session.execute(text("""
+            SELECT status, count(*)::int AS total
+            FROM applications WHERE organization_id=:organization_id
+            GROUP BY status ORDER BY total DESC, status
+        """), {"organization_id": org_id})).mappings().all()
+        source_rows = (await session.execute(text("""
+            SELECT j.source, count(*)::int AS jobs,
+                   count(a.id)::int AS applications,
+                   count(a.id) FILTER (WHERE a.status IN ('APPLIED','CONFIRMED','INTERVIEW','OFFER'))::int AS progressed
+            FROM jobs j LEFT JOIN applications a ON a.job_id=j.id
+            WHERE j.organization_id=:organization_id
+            GROUP BY j.source ORDER BY jobs DESC, j.source LIMIT 20
+        """), {"organization_id": org_id})).mappings().all()
+        communication_rows = (await session.execute(text("""
+            SELECT category, count(*)::int AS total
+            FROM recruitment_communications WHERE organization_id=:organization_id
+            GROUP BY category ORDER BY total DESC, category
+        """), {"organization_id": org_id})).mappings().all()
+        intervention_row = (await session.execute(text("""
+            SELECT count(*)::int AS total,
+                   count(*) FILTER (WHERE status='PENDING')::int AS pending,
+                   count(*) FILTER (WHERE status='RESOLVED')::int AS resolved
+            FROM human_interventions WHERE organization_id=:organization_id
+        """), {"organization_id": org_id})).mappings().one()
+    statuses = {row["status"]: row["total"] for row in application_rows}
+    applications = sum(statuses.values())
+    submitted = sum(statuses.get(status, 0) for status in ("APPLIED", "CONFIRMED", "INTERVIEW", "OFFER"))
+    responses = sum(row["total"] for row in communication_rows
+                    if row["category"] in {"INTERVIEW", "PROPOSAL", "REJECTION", "APPLICATION_CONFIRMED"})
+    warnings = []
+    if applications < 10:
+        warnings.append("Amostra de candidaturas insuficiente para recomendações confiáveis (mínimo: 10).")
+    if submitted == 0:
+        warnings.append("Ainda não há candidatura enviada e confirmada no Core.")
+    return {
+        "sample": {"applications": applications, "submitted": submitted,
+                   "communications": sum(row["total"] for row in communication_rows)},
+        "funnel": [{"status": row["status"], "total": row["total"]} for row in application_rows],
+        "sources": [dict(row) for row in source_rows],
+        "communications": [dict(row) for row in communication_rows],
+        "interventions": dict(intervention_row),
+        "rates": {
+            "submission_percent": round(submitted * 100 / applications, 1) if applications else None,
+            "response_percent": round(responses * 100 / submitted, 1) if submitted else None,
+        },
+        "warnings": warnings,
+        "recommendations_enabled": applications >= 10 and submitted > 0,
+        "generated_at": datetime.now(UTC),
+    }
 
 
 @router.post("/interventions")
