@@ -74,17 +74,35 @@ services:
     security_opt: ["no-new-privileges:true"]
     networks: [private]
 
+  integrations:
+    build:
+      context: ../../apps/automation-host
+    environment:
+      CAREER_RUNTIME: /data/runtime
+      LOCAL_AI_URL: http://127.0.0.1:8080/v1
+    volumes:
+      - integrations_data:/data/runtime
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    networks: [private]
+
   web:
     build:
       context: ../..
       dockerfile: apps/web/Dockerfile
       args:
         FOUNDATION_API_URL: http://api:8000
-        AUTOMATION_HOST_URL: http://127.0.0.1:8765
+        AUTOMATION_HOST_URL: http://integrations:8765
     environment:
       FOUNDATION_API_URL: http://api:8000
       FOUNDATION_ADMIN_TOKEN: "${ADMIN_API_TOKEN:?Defina ADMIN_API_TOKEN}"
-      AUTOMATION_HOST_URL: http://127.0.0.1:8765
+      AUTOMATION_HOST_URL: http://integrations:8765
       PORTAL_LOGIN_EMAIL: "${PORTAL_LOGIN_EMAIL:?Defina PORTAL_LOGIN_EMAIL}"
       PORTAL_PASSWORD_HASH: "${PORTAL_PASSWORD_HASH:?Defina PORTAL_PASSWORD_HASH}"
       PORTAL_SESSION_SECRET: "${PORTAL_SESSION_SECRET:?Defina PORTAL_SESSION_SECRET}"
@@ -92,6 +110,7 @@ services:
       - "127.0.0.1:${CAREER_PORT:-8093}:3000"
     depends_on:
       api: { condition: service_healthy }
+      integrations: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:3000/"]
       interval: 15s
@@ -111,3 +130,4 @@ volumes:
   postgres_data:
   redis_data:
   resume_data:
+  integrations_data:
