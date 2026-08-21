@@ -14,7 +14,7 @@
 
 ## Próximas fases
 
-1. Fase 6 — analytics de conversão, riscos, recomendações e preparação comercial SaaS.
+1. Fase 6 (em andamento) — analytics explicável entregue; faltam séries históricas, metas e preparação comercial SaaS.
 
 ## Regra de evolução
 

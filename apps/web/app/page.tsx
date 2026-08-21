@@ -14,6 +14,7 @@ type View =
   | "inbox"
   | "notifications"
   | "interventions"
+  | "analytics"
   | "automation"
   | "settings"
   | "logs"
@@ -139,6 +140,7 @@ type PortalDashboard = {
 };
 type CareerNotification = { id: string; kind: string; title: string; body: string; priority: string; read_at?: string | null; created_at: string };
 type HumanIntervention = { id: string; reason: string; status: string; title: string; instructions: string; page_url?: string | null; evidence: Record<string, unknown>; created_at: string };
+type CareerAnalytics = { sample: { applications: number; submitted: number; communications: number }; funnel: Array<{ status: string; total: number }>; sources: Array<{ source: string; jobs: number; applications: number; progressed: number }>; interventions: { total: number; pending: number; resolved: number }; rates: { submission_percent: number | null; response_percent: number | null }; warnings: string[]; recommendations_enabled: boolean; generated_at: string };
 const AGENT_URL = "/agent";
 
 const nav: Array<[View, string]> = [
@@ -153,6 +155,7 @@ const nav: Array<[View, string]> = [
   ["inbox", "Gmail e Agenda"],
   ["notifications", "Notificações"],
   ["interventions", "Intervenções"],
+  ["analytics", "Resultados"],
   ["automation", "Automação"],
   ["settings", "Preferências"],
   ["logs", "Auditoria"],
@@ -243,6 +246,7 @@ export default function Home() {
   const [dashboard, setDashboard] = useState<PortalDashboard | null>(null);
   const [notifications, setNotifications] = useState<CareerNotification[]>([]);
   const [interventions, setInterventions] = useState<HumanIntervention[]>([]);
+  const [analytics, setAnalytics] = useState<CareerAnalytics | null>(null);
   const [dashboardMessage, setDashboardMessage] = useState(
     "Sincronizando dados da VPS…",
   );
@@ -300,6 +304,9 @@ export default function Home() {
       const interventionResponse = await fetch("/api/portal/interventions?status=PENDING", { cache: "no-store" }).catch(() => null);
       if (interventionResponse?.ok)
         setInterventions((await interventionResponse.json()) as HumanIntervention[]);
+      const analyticsResponse = await fetch("/api/portal/analytics", { cache: "no-store" }).catch(() => null);
+      if (analyticsResponse?.ok)
+        setAnalytics((await analyticsResponse.json()) as CareerAnalytics);
       setDashboardMessage("Dados persistidos e atualizados pela VPS.");
     }
     void refreshDashboard();
@@ -1377,6 +1384,11 @@ export default function Home() {
           <div className="section-header"><div><h3>Intervenções humanas</h3><p>Somente decisões que exigem você. CAPTCHA, MFA e dados não comprovados nunca são contornados.</p></div><span className="badge">{interventions.length} pendente(s)</span></div>
           {interventions.length === 0 ? <div className="empty-state"><strong>Tudo sob controle</strong><p className="muted">Nenhuma ação humana está pendente.</p></div> : <div className="intervention-list">{interventions.map((item) => <section key={item.id} className="intervention-card"><div><span className="badge">{item.reason.replaceAll("_", " ")}</span><strong>{item.title}</strong><p>{item.instructions}</p><small>{new Date(item.created_at).toLocaleString("pt-BR")}</small></div><div className="intervention-actions">{item.page_url && <a className="secondary-button" href={item.page_url} target="_blank" rel="noreferrer">Abrir página</a>}<button className="primary" onClick={() => void resolveIntervention(item.id, "RESOLVED")}>Concluí</button><button onClick={() => void resolveIntervention(item.id, "SKIPPED")}>Ignorar</button></div></section>)}</div>}
         </article>}
+        {view === "analytics" && <>
+          <section className="metrics analytics-metrics"><article><span>Candidaturas no Core</span><b>{analytics?.sample.applications ?? 0}</b><small>Base auditável</small></article><article><span>Envios confirmados</span><b>{analytics?.sample.submitted ?? 0}</b><small>{analytics?.rates.submission_percent == null ? "Sem taxa calculável" : `${analytics.rates.submission_percent}% da base`}</small></article><article><span>Comunicações</span><b>{analytics?.sample.communications ?? 0}</b><small>{analytics?.rates.response_percent == null ? "Sem taxa calculável" : `${analytics.rates.response_percent}% após envio`}</small></article><article><span>Ações humanas</span><b>{analytics?.interventions.pending ?? 0}</b><small>{analytics?.interventions.resolved ?? 0} resolvidas</small></article></section>
+          <div className="dashboard-grid"><article className="panel"><h3>Funil comprovado</h3>{!analytics || analytics.funnel.length === 0 ? <p className="muted">Sem candidaturas persistidas. O sistema não fabricará indicadores.</p> : <div className="analytics-list">{analytics.funnel.map((item) => <div key={item.status}><span>{item.status.replaceAll("_", " ")}</span><strong>{item.total}</strong></div>)}</div>}</article><article className="panel"><h3>Qualidade da análise</h3>{analytics?.warnings.length ? <ul className="warning-list">{analytics.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : <p className="ok">Amostra mínima disponível para recomendações.</p>}<p className="muted">Recomendações automáticas: {analytics?.recommendations_enabled ? "habilitadas pela amostra" : "bloqueadas por segurança"}.</p></article></div>
+          <article className="panel"><h3>Desempenho por fonte</h3>{!analytics || analytics.sources.length === 0 ? <p className="muted">Nenhuma fonte possui dados persistidos.</p> : <div className="analytics-list">{analytics.sources.map((item) => <div key={item.source}><span><strong>{item.source}</strong><small>{item.jobs} vagas · {item.applications} candidaturas</small></span><b>{item.progressed} avançaram</b></div>)}</div>}</article>
+        </>}
         {view === "inbox" && (
           <article className="panel">
             <div className="section-header">

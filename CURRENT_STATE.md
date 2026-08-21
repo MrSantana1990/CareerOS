@@ -94,3 +94,11 @@ As próximas fases devem usar migrations aditivas, manter volumes e `.env`, nunc
 - o executor não tenta resolver, contornar ou inventar respostas;
 - central móvel permite abrir a página, concluir ou ignorar com registro;
 - autoenvio e descoberta continuam desligados por padrão.
+
+## Fase 6 — incremento 1
+
+- analytics operacionais calculados diretamente no PostgreSQL;
+- funil por status, desempenho por fonte, comunicações e intervenções;
+- taxas nulas quando não existe denominador confiável;
+- recomendações bloqueadas até existir amostra mínima de 10 candidaturas e ao menos um envio confirmado;
+- tela mobile **Resultados** informa claramente quando não há dados suficientes.
