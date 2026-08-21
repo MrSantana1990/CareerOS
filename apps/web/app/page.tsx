@@ -155,7 +155,7 @@ type PortalDashboard = {
 };
 type CareerNotification = { id: string; kind: string; title: string; body: string; priority: string; read_at?: string | null; created_at: string };
 type HumanIntervention = { id: string; reason: string; status: string; title: string; instructions: string; page_url?: string | null; evidence: Record<string, unknown>; created_at: string };
-type CareerAnalytics = { sample: { applications: number; submitted: number; communications: number }; funnel: Array<{ status: string; total: number }>; sources: Array<{ source: string; jobs: number; applications: number; progressed: number }>; interventions: { total: number; pending: number; resolved: number }; rates: { submission_percent: number | null; response_percent: number | null }; warnings: string[]; recommendations_enabled: boolean; generated_at: string };
+type CareerAnalytics = { sample: { applications: number; submitted: number; communications: number }; funnel: Array<{ status: string; total: number }>; sources: Array<{ source: string; jobs: number; applications: number; progressed: number }>; interventions: { total: number; pending: number; resolved: number }; rates: { submission_percent: number | null; response_percent: number | null }; timeline: Array<{ day: string; jobs: number; applications: number; responses: number }>; cohorts: Array<{ week: string; applications: number; submitted: number; responses: number }>; goals: { weekly_applications: number; weekly_responses: number; minimum_response_percent: number }; goal_progress: { applications: number; responses: number; applications_percent: number; responses_percent: number | null }; warnings: string[]; recommendations_enabled: boolean; generated_at: string };
 const AGENT_URL = "/agent";
 
 const nav: Array<[View, string]> = [
@@ -262,6 +262,8 @@ export default function Home() {
   const [notifications, setNotifications] = useState<CareerNotification[]>([]);
   const [interventions, setInterventions] = useState<HumanIntervention[]>([]);
   const [analytics, setAnalytics] = useState<CareerAnalytics | null>(null);
+  const [goalDraft, setGoalDraft] = useState({ weekly_applications: 20, weekly_responses: 3, minimum_response_percent: 10 });
+  const [goalMessage, setGoalMessage] = useState("");
   const [automationMetrics, setAutomationMetrics] = useState<AutomationMetrics | null>(null);
   const [dashboardMessage, setDashboardMessage] = useState(
     "Sincronizando dados da VPS…",
@@ -321,8 +323,11 @@ export default function Home() {
       if (interventionResponse?.ok)
         setInterventions((await interventionResponse.json()) as HumanIntervention[]);
       const analyticsResponse = await fetch("/api/portal/analytics", { cache: "no-store" }).catch(() => null);
-      if (analyticsResponse?.ok)
-        setAnalytics((await analyticsResponse.json()) as CareerAnalytics);
+      if (analyticsResponse?.ok) {
+        const nextAnalytics = (await analyticsResponse.json()) as CareerAnalytics;
+        setAnalytics(nextAnalytics);
+        if (nextAnalytics.goals) setGoalDraft(nextAnalytics.goals);
+      }
       setDashboardMessage("Dados persistidos e atualizados pela VPS.");
     }
     void refreshDashboard();
@@ -420,6 +425,18 @@ export default function Home() {
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
     window.location.assign("/login");
+  }
+
+  async function saveGoals(event: FormEvent) {
+    event.preventDefault();
+    setGoalMessage("Salvando metas...");
+    const response = await fetch("/api/portal/analytics/goals", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(goalDraft),
+    });
+    setGoalMessage(response.ok ? "Metas atualizadas." : "Não foi possível salvar as metas.");
+    if (response.ok) record("Metas semanais atualizadas.");
   }
 
   async function openLogin() {
@@ -1418,6 +1435,9 @@ export default function Home() {
           <section className="metrics analytics-metrics"><article><span>Candidaturas no Core</span><b>{analytics?.sample.applications ?? 0}</b><small>Base auditável</small></article><article><span>Envios confirmados</span><b>{analytics?.sample.submitted ?? 0}</b><small>{analytics?.rates.submission_percent == null ? "Sem taxa calculável" : `${analytics.rates.submission_percent}% da base`}</small></article><article><span>Comunicações</span><b>{analytics?.sample.communications ?? 0}</b><small>{analytics?.rates.response_percent == null ? "Sem taxa calculável" : `${analytics.rates.response_percent}% após envio`}</small></article><article><span>Ações humanas</span><b>{analytics?.interventions.pending ?? 0}</b><small>{analytics?.interventions.resolved ?? 0} resolvidas</small></article></section>
           <div className="dashboard-grid"><article className="panel"><h3>Funil comprovado</h3>{!analytics || analytics.funnel.length === 0 ? <p className="muted">Sem candidaturas persistidas. O sistema não fabricará indicadores.</p> : <div className="analytics-list">{analytics.funnel.map((item) => <div key={item.status}><span>{item.status.replaceAll("_", " ")}</span><strong>{item.total}</strong></div>)}</div>}</article><article className="panel"><h3>Qualidade da análise</h3>{analytics?.warnings.length ? <ul className="warning-list">{analytics.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : <p className="ok">Amostra mínima disponível para recomendações.</p>}<p className="muted">Recomendações automáticas: {analytics?.recommendations_enabled ? "habilitadas pela amostra" : "bloqueadas por segurança"}.</p></article></div>
           <article className="panel"><h3>Desempenho por fonte</h3>{!analytics || analytics.sources.length === 0 ? <p className="muted">Nenhuma fonte possui dados persistidos.</p> : <div className="analytics-list">{analytics.sources.map((item) => <div key={item.source}><span><strong>{item.source}</strong><small>{item.jobs} vagas · {item.applications} candidaturas</small></span><b>{item.progressed} avançaram</b></div>)}</div>}</article>
+          <div className="dashboard-grid analytics-detail-grid"><article className="panel"><h3>Últimos 30 dias</h3><p className="muted">Vagas, candidaturas e respostas por dia, diretamente da base auditável.</p><div className="timeline-legend"><span><i className="jobs" />Vagas</span><span><i className="applications" />Candidaturas</span><span><i className="responses" />Respostas</span></div><div className="timeline-chart">{(analytics?.timeline ?? []).map((item) => { const maximum = Math.max(1, ...(analytics?.timeline ?? []).flatMap((point) => [point.jobs, point.applications, point.responses])); return <div key={item.day} title={`${new Date(item.day).toLocaleDateString("pt-BR")}: ${item.jobs} vagas, ${item.applications} candidaturas, ${item.responses} respostas`}><div className="timeline-bars"><span className="jobs" style={{ height: `${Math.max(3, item.jobs * 100 / maximum)}%` }} /><span className="applications" style={{ height: `${Math.max(3, item.applications * 100 / maximum)}%` }} /><span className="responses" style={{ height: `${Math.max(3, item.responses * 100 / maximum)}%` }} /></div><small>{new Date(item.day).getDate()}</small></div>; })}</div></article><form className="panel form goal-form" onSubmit={saveGoals}><h3>Metas semanais</h3><label>Candidaturas qualificadas<input type="number" min="1" max="500" value={goalDraft.weekly_applications} onChange={(event) => setGoalDraft({ ...goalDraft, weekly_applications: Number(event.target.value) })} /></label><label>Respostas esperadas<input type="number" min="0" max="500" value={goalDraft.weekly_responses} onChange={(event) => setGoalDraft({ ...goalDraft, weekly_responses: Number(event.target.value) })} /></label><label>Taxa mínima de resposta (%)<input type="number" min="0" max="100" step="0.1" value={goalDraft.minimum_response_percent} onChange={(event) => setGoalDraft({ ...goalDraft, minimum_response_percent: Number(event.target.value) })} /></label><button className="primary" type="submit">Salvar metas</button>{goalMessage && <span className="ok">{goalMessage}</span>}</form></div>
+          <article className="panel"><h3>Progresso da semana</h3><div className="goal-progress"><div><span>Candidaturas</span><strong>{analytics?.goal_progress.applications ?? 0} / {analytics?.goals.weekly_applications ?? goalDraft.weekly_applications}</strong><progress max="100" value={Math.min(100, analytics?.goal_progress.applications_percent ?? 0)} /></div><div><span>Respostas</span><strong>{analytics?.goal_progress.responses ?? 0} / {analytics?.goals.weekly_responses ?? goalDraft.weekly_responses}</strong><progress max="100" value={Math.min(100, analytics?.goal_progress.responses_percent ?? 0)} /></div></div></article>
+          <article className="panel"><h3>Coortes semanais</h3>{!analytics?.cohorts.length ? <p className="muted">As coortes aparecerão quando houver candidaturas persistidas.</p> : <div className="analytics-list">{analytics.cohorts.map((item) => <div key={item.week}><span><strong>Semana de {new Date(item.week).toLocaleDateString("pt-BR")}</strong><small>{item.applications} candidaturas · {item.submitted} envios</small></span><b>{item.responses} respostas</b></div>)}</div>}</article>
         </>}
         {view === "inbox" && (
           <article className="panel">

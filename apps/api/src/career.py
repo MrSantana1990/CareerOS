@@ -110,6 +110,12 @@ class InterventionResolution(BaseModel):
     resolution: Literal["RESOLVED", "SKIPPED", "CANCELLED"]
 
 
+class CareerGoalInput(BaseModel):
+    weekly_applications: int = Field(default=20, ge=1, le=500)
+    weekly_responses: int = Field(default=3, ge=0, le=500)
+    minimum_response_percent: float = Field(default=10, ge=0, le=100)
+
+
 class SourceConnectionInput(BaseModel):
     adapter: Literal["GREENHOUSE", "LEVER", "ASHBY"]
     account_key: str = Field(min_length=2, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")
@@ -906,6 +912,52 @@ async def career_analytics(slug: str = Depends(require_admin)) -> dict[str, Any]
                    count(*) FILTER (WHERE status='RESOLVED')::int AS resolved
             FROM human_interventions WHERE organization_id=:organization_id
         """), {"organization_id": org_id})).mappings().one()
+        timeline_rows = (await session.execute(text("""
+            WITH days AS (
+              SELECT generate_series(current_date - interval '29 days', current_date, interval '1 day')::date AS day
+            ), job_counts AS (
+              SELECT created_at::date AS day, count(*)::int AS total FROM jobs
+              WHERE organization_id=:organization_id AND created_at >= current_date - interval '29 days'
+              GROUP BY created_at::date
+            ), application_counts AS (
+              SELECT created_at::date AS day, count(*)::int AS total FROM applications
+              WHERE organization_id=:organization_id AND created_at >= current_date - interval '29 days'
+              GROUP BY created_at::date
+            ), response_counts AS (
+              SELECT received_at::date AS day, count(*)::int AS total FROM recruitment_communications
+              WHERE organization_id=:organization_id AND received_at >= current_date - interval '29 days'
+                AND category IN ('INTERVIEW','PROPOSAL','REJECTION','APPLICATION_CONFIRMED')
+              GROUP BY received_at::date
+            )
+            SELECT d.day, COALESCE(j.total,0)::int AS jobs,
+                   COALESCE(a.total,0)::int AS applications, COALESCE(r.total,0)::int AS responses
+            FROM days d LEFT JOIN job_counts j USING(day)
+            LEFT JOIN application_counts a USING(day) LEFT JOIN response_counts r USING(day)
+            ORDER BY d.day
+        """), {"organization_id": org_id})).mappings().all()
+        cohort_rows = (await session.execute(text("""
+            SELECT date_trunc('week', a.created_at)::date AS week,
+                   count(DISTINCT a.id)::int AS applications,
+                   count(DISTINCT a.id) FILTER (WHERE a.status IN ('APPLIED','CONFIRMED','INTERVIEW','OFFER'))::int AS submitted,
+                   count(DISTINCT rc.application_id) FILTER (WHERE rc.category IN ('INTERVIEW','PROPOSAL','REJECTION','APPLICATION_CONFIRMED'))::int AS responses
+            FROM applications a LEFT JOIN recruitment_communications rc ON rc.application_id=a.id
+            WHERE a.organization_id=:organization_id AND a.created_at >= current_date - interval '12 weeks'
+            GROUP BY date_trunc('week', a.created_at)::date ORDER BY week
+        """), {"organization_id": org_id})).mappings().all()
+        goal_row = (await session.execute(text("""
+            SELECT weekly_applications, weekly_responses, minimum_response_percent
+            FROM career_goals WHERE organization_id=:organization_id
+        """), {"organization_id": org_id})).mappings().first()
+        current_week_row = (await session.execute(text("""
+            SELECT
+              (SELECT count(*)::int FROM applications
+               WHERE organization_id=:organization_id
+                 AND created_at >= date_trunc('week', current_date)) AS applications,
+              (SELECT count(DISTINCT application_id)::int FROM recruitment_communications
+               WHERE organization_id=:organization_id
+                 AND received_at >= date_trunc('week', current_date)
+                 AND category IN ('INTERVIEW','PROPOSAL','REJECTION','APPLICATION_CONFIRMED')) AS responses
+        """), {"organization_id": org_id})).mappings().one()
     statuses = {row["status"]: row["total"] for row in application_rows}
     applications = sum(statuses.values())
     submitted = sum(statuses.get(status, 0) for status in ("APPLIED", "CONFIRMED", "INTERVIEW", "OFFER"))
@@ -916,6 +968,10 @@ async def career_analytics(slug: str = Depends(require_admin)) -> dict[str, Any]
         warnings.append("Amostra de candidaturas insuficiente para recomendações confiáveis (mínimo: 10).")
     if submitted == 0:
         warnings.append("Ainda não há candidatura enviada e confirmada no Core.")
+    goals = dict(goal_row) if goal_row else {
+        "weekly_applications": 20, "weekly_responses": 3, "minimum_response_percent": 10.0,
+    }
+    current_week = dict(current_week_row)
     return {
         "sample": {"applications": applications, "submitted": submitted,
                    "communications": sum(row["total"] for row in communication_rows)},
@@ -923,6 +979,15 @@ async def career_analytics(slug: str = Depends(require_admin)) -> dict[str, Any]
         "sources": [dict(row) for row in source_rows],
         "communications": [dict(row) for row in communication_rows],
         "interventions": dict(intervention_row),
+        "timeline": [dict(row) for row in timeline_rows],
+        "cohorts": [dict(row) for row in cohort_rows],
+        "goals": goals,
+        "goal_progress": {
+            "applications": current_week.get("applications", 0),
+            "responses": current_week.get("responses", 0),
+            "applications_percent": round(current_week.get("applications", 0) * 100 / goals["weekly_applications"], 1),
+            "responses_percent": round(current_week.get("responses", 0) * 100 / goals["weekly_responses"], 1) if goals["weekly_responses"] else None,
+        },
         "rates": {
             "submission_percent": round(submitted * 100 / applications, 1) if applications else None,
             "response_percent": round(responses * 100 / submitted, 1) if submitted else None,
@@ -931,6 +996,26 @@ async def career_analytics(slug: str = Depends(require_admin)) -> dict[str, Any]
         "recommendations_enabled": applications >= 10 and submitted > 0,
         "generated_at": datetime.now(UTC),
     }
+
+
+@router.put("/analytics/goals")
+async def update_analytics_goals(payload: CareerGoalInput,
+                                 slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        row = (await session.execute(text("""
+            INSERT INTO career_goals
+              (id, organization_id, weekly_applications, weekly_responses, minimum_response_percent)
+            VALUES (gen_random_uuid(), :organization_id, :weekly_applications, :weekly_responses, :minimum_response_percent)
+            ON CONFLICT (organization_id) DO UPDATE SET
+              weekly_applications=EXCLUDED.weekly_applications,
+              weekly_responses=EXCLUDED.weekly_responses,
+              minimum_response_percent=EXCLUDED.minimum_response_percent,
+              updated_at=now()
+            RETURNING weekly_applications, weekly_responses, minimum_response_percent, updated_at
+        """), {"organization_id": org_id, **payload.model_dump()})).mappings().one()
+        await session.commit()
+    return dict(row)
 
 
 @router.post("/interventions")
