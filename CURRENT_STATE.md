@@ -111,3 +111,6 @@ As próximas fases devem usar migrations aditivas, manter volumes e `.env`, nunc
 - senha pode ser exibida temporariamente para conferência;
 - recuperação acontece na mesma página com código temporário enviado ao e-mail administrativo;
 - entrega Gmail usa endpoint privado autenticado e nunca envia a senha.
+- HTTP é redirecionado permanentemente para HTTPS antes do login;
+- aceite explícito do cookie essencial aparece no próprio cartão;
+- campo de recuperação é separado, controlado, inicia vazio e não reutiliza o e-mail.

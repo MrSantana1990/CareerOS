@@ -126,6 +126,30 @@
   background: #431d26;
   font-size: 13px;
 }
+.cookie-consent {
+  display: grid;
+  gap: 12px;
+  margin-top: 20px;
+  padding: 14px;
+  border: 1px solid #2c6570;
+  border-radius: 12px;
+  background: #0b2632;
+}
+.cookie-consent strong {
+  color: #f2fbff;
+}
+.cookie-consent p {
+  margin: 5px 0 0;
+  font-size: 13px;
+}
+.cookie-consent button {
+  width: 100%;
+}
+.login-card .field-hint {
+  margin: -8px 0 0;
+  text-align: left;
+  line-height: 1.45;
+}
 .mail-card {
   display: grid;
   gap: 8px;
