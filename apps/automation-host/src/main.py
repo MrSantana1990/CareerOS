@@ -15,6 +15,8 @@ from urllib.parse import quote_plus, urljoin, urlparse
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
+
+from .url_policy import authenticated_application_url
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 from .google_career import (connection_status, create_application_email_draft,
@@ -310,14 +312,6 @@ def normalized_tokens(value: str) -> set[str]:
         token for token in re.findall(r"[a-z0-9+#.]{2,}", value.lower())
         if token not in {"para", "com", "uma", "das", "dos", "and", "the"}
     }
-
-
-def authenticated_application_url(value: str) -> str:
-    """Use the LinkedIn host covered by the authenticated session cookie."""
-    parsed = urlparse(value)
-    if parsed.netloc.lower() in {"br.linkedin.com", "linkedin.com"}:
-        return parsed._replace(netloc="www.linkedin.com").geturl()
-    return value
 
 
 def calculate_match(job: dict, profile: ProfessionalProfile) -> tuple[int, list[str], list[str]]:
