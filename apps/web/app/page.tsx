@@ -31,11 +31,26 @@ type ApprovedAnswer = {
 type LogEntry = { at: string; message: string };
 type AgentStatus = {
   status: string;
+  service_online?: boolean;
+  executor_mode?: string;
   platform?: string;
   role?: string;
   found: number;
   blocked: number;
   message: string;
+};
+type AutomationMetrics = {
+  service_online: boolean;
+  executor_mode: string;
+  status: string;
+  jobs: number;
+  applications: number;
+  blocked: number;
+  decisions: Record<string, number>;
+  application_statuses: Record<string, number>;
+  sources: Record<string, number>;
+  events: number;
+  updated_at?: string | null;
 };
 type Job = {
   source: string;
@@ -155,7 +170,7 @@ const nav: Array<[View, string]> = [
   ["inbox", "Gmail e Agenda"],
   ["notifications", "Notificações"],
   ["interventions", "Intervenções"],
-  ["analytics", "Resultados"],
+  ["analytics", "Métricas"],
   ["automation", "Automação"],
   ["settings", "Preferências"],
   ["logs", "Auditoria"],
@@ -247,6 +262,7 @@ export default function Home() {
   const [notifications, setNotifications] = useState<CareerNotification[]>([]);
   const [interventions, setInterventions] = useState<HumanIntervention[]>([]);
   const [analytics, setAnalytics] = useState<CareerAnalytics | null>(null);
+  const [automationMetrics, setAutomationMetrics] = useState<AutomationMetrics | null>(null);
   const [dashboardMessage, setDashboardMessage] = useState(
     "Sincronizando dados da VPS…",
   );
@@ -319,13 +335,17 @@ export default function Home() {
       try {
         const statusResponse = await fetch(`${AGENT_URL}/status`);
         if (!statusResponse.ok) throw new Error("agent-status");
-        if (statusResponse.ok)
-          setAgent((await statusResponse.json()) as AgentStatus);
-        const [jobsResult, applicationsResult, googleResult] =
+        if (statusResponse.ok) {
+          const nextAgent = (await statusResponse.json()) as AgentStatus;
+          setAgent(nextAgent);
+          setRunning(["running", "applying", "preparing"].includes(nextAgent.status));
+        }
+        const [jobsResult, applicationsResult, googleResult, metricsResult] =
           await Promise.allSettled([
             fetch(`${AGENT_URL}/jobs`),
             fetch(`${AGENT_URL}/applications`),
             fetch(`${AGENT_URL}/google/status`),
+            fetch(`${AGENT_URL}/metrics`),
           ]);
         if (jobsResult.status === "fulfilled" && jobsResult.value.ok)
           setJobs((await jobsResult.value.json()) as Job[]);
@@ -338,6 +358,8 @@ export default function Home() {
           );
         if (googleResult.status === "fulfilled" && googleResult.value.ok)
           setGoogleStatus((await googleResult.value.json()) as GoogleStatus);
+        if (metricsResult.status === "fulfilled" && metricsResult.value.ok)
+          setAutomationMetrics((await metricsResult.value.json()) as AutomationMetrics);
       } catch {
         setAgent((current) => ({
           ...current,
@@ -378,12 +400,13 @@ export default function Home() {
 
   async function beginWork() {
     try {
-      await fetch(`${AGENT_URL}/browser/start`, { method: "POST" });
+      const response = await fetch(`${AGENT_URL}/browser/start`, { method: "POST" });
+      if (!response.ok) throw new Error("executor-start");
       setRunning(true);
       record(`Agente iniciado. Busca principal: ${mainRole}.`);
       setView("automation");
     } catch {
-      record("Falha ao conectar ao agente local na porta 8765.");
+      record("Falha ao iniciar o executor do navegador na VPS.");
       setView("automation");
     }
   }
@@ -392,6 +415,11 @@ export default function Home() {
     await fetch(`${AGENT_URL}/stop`, { method: "POST" }).catch(() => undefined);
     setRunning(false);
     record("Sessão interrompida pelo botão de emergência.");
+  }
+
+  async function logout() {
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+    window.location.assign("/login");
   }
 
   async function openLogin() {
@@ -713,8 +741,8 @@ export default function Home() {
           ))}
         </nav>
         <div className="sidebar-foot">
-          <span className="status-dot online" />
-          VPS online
+          <span><span className="status-dot online" /> VPS online</span>
+          <button className="logout-button" onClick={() => void logout()}>Sair</button>
         </div>
       </aside>
       <section className="content">
@@ -731,6 +759,7 @@ export default function Home() {
             <button className="intervention-button" onClick={() => setView("interventions")}>Ações <span>{interventions.length}</span></button>
             <button className="notification-button" onClick={() => setView("notifications")}>Alertas <span>{notifications.filter((item) => !item.read_at).length}</span></button>
             <button className="danger" onClick={stopWork} disabled={!running}>PARAR AUTOMAÇÃO</button>
+            <button className="logout-button mobile-logout" onClick={() => void logout()}>Sair</button>
           </div>
         </header>
 
@@ -1385,6 +1414,7 @@ export default function Home() {
           {interventions.length === 0 ? <div className="empty-state"><strong>Tudo sob controle</strong><p className="muted">Nenhuma ação humana está pendente.</p></div> : <div className="intervention-list">{interventions.map((item) => <section key={item.id} className="intervention-card"><div><span className="badge">{item.reason.replaceAll("_", " ")}</span><strong>{item.title}</strong><p>{item.instructions}</p><small>{new Date(item.created_at).toLocaleString("pt-BR")}</small></div><div className="intervention-actions">{item.page_url && <a className="secondary-button" href={item.page_url} target="_blank" rel="noreferrer">Abrir página</a>}<button className="primary" onClick={() => void resolveIntervention(item.id, "RESOLVED")}>Concluí</button><button onClick={() => void resolveIntervention(item.id, "SKIPPED")}>Ignorar</button></div></section>)}</div>}
         </article>}
         {view === "analytics" && <>
+          <section className="metrics analytics-metrics"><article><span>Vagas coletadas</span><b>{automationMetrics?.jobs ?? jobs.length}</b><small>Executor {automationMetrics?.executor_mode === "vps" ? "na VPS" : "local"}</small></article><article><span>Na fila operacional</span><b>{automationMetrics?.applications ?? applications.length}</b><small>Preparadas e processadas</small></article><article><span>Eventos auditados</span><b>{automationMetrics?.events ?? 0}</b><small>Histórico da automação</small></article><article><span>Executor</span><b className={automationMetrics?.service_online ? "ok" : "danger-text"}>{automationMetrics?.service_online ? "ONLINE" : "OFFLINE"}</b><small>{automationMetrics?.status ?? agent.status}</small></article></section>
           <section className="metrics analytics-metrics"><article><span>Candidaturas no Core</span><b>{analytics?.sample.applications ?? 0}</b><small>Base auditável</small></article><article><span>Envios confirmados</span><b>{analytics?.sample.submitted ?? 0}</b><small>{analytics?.rates.submission_percent == null ? "Sem taxa calculável" : `${analytics.rates.submission_percent}% da base`}</small></article><article><span>Comunicações</span><b>{analytics?.sample.communications ?? 0}</b><small>{analytics?.rates.response_percent == null ? "Sem taxa calculável" : `${analytics.rates.response_percent}% após envio`}</small></article><article><span>Ações humanas</span><b>{analytics?.interventions.pending ?? 0}</b><small>{analytics?.interventions.resolved ?? 0} resolvidas</small></article></section>
           <div className="dashboard-grid"><article className="panel"><h3>Funil comprovado</h3>{!analytics || analytics.funnel.length === 0 ? <p className="muted">Sem candidaturas persistidas. O sistema não fabricará indicadores.</p> : <div className="analytics-list">{analytics.funnel.map((item) => <div key={item.status}><span>{item.status.replaceAll("_", " ")}</span><strong>{item.total}</strong></div>)}</div>}</article><article className="panel"><h3>Qualidade da análise</h3>{analytics?.warnings.length ? <ul className="warning-list">{analytics.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : <p className="ok">Amostra mínima disponível para recomendações.</p>}<p className="muted">Recomendações automáticas: {analytics?.recommendations_enabled ? "habilitadas pela amostra" : "bloqueadas por segurança"}.</p></article></div>
           <article className="panel"><h3>Desempenho por fonte</h3>{!analytics || analytics.sources.length === 0 ? <p className="muted">Nenhuma fonte possui dados persistidos.</p> : <div className="analytics-list">{analytics.sources.map((item) => <div key={item.source}><span><strong>{item.source}</strong><small>{item.jobs} vagas · {item.applications} candidaturas</small></span><b>{item.progressed} avançaram</b></div>)}</div>}</article>
@@ -1508,6 +1538,10 @@ export default function Home() {
         {view === "automation" && (
           <article className="panel">
             <h3>Agente automático</h3>
+            <div className="executor-status-grid">
+              <div><span className="status-dot online" /><strong> Central VPS online</strong><small> Painel, dados e agendador disponíveis 24 horas.</small></div>
+              <div><span className={`status-dot ${agent.service_online ? "online" : ""}`} /><strong> Executor {agent.executor_mode === "vps" ? "na VPS" : "local"}</strong><small> {agent.service_online ? "Conectado" : "Sem comunicação"}</small></div>
+            </div>
             <p>
               Status:{" "}
               <strong

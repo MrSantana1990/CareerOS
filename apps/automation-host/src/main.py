@@ -43,6 +43,8 @@ RESUME_STORAGE = Path(os.getenv("RESUME_STORAGE_DIR", "/data/resumes")).resolve(
 CAREER_API_URL = os.getenv("CAREER_API_URL", "http://api:8000").rstrip("/")
 CAREER_ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 EXECUTOR_ID = os.getenv("EXECUTOR_ID", "local-browser")
+BROWSER_HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() in {"1", "true", "yes"}
+BROWSER_CHANNEL = os.getenv("BROWSER_CHANNEL", "chrome").strip().lower()
 
 INTERVENTION_PATTERNS = {
     "CAPTCHA": re.compile(r"captcha|recaptcha|não sou um robô", re.IGNORECASE),
@@ -420,12 +422,18 @@ async def ensure_browser() -> BrowserContext:
         return context
     PROFILE.mkdir(parents=True, exist_ok=True)
     playwright = await async_playwright().start()
-    context = await playwright.chromium.launch_persistent_context(
-        user_data_dir=str(PROFILE), channel="chrome", headless=False,
-        viewport={"width": 1440, "height": 900}, locale="pt-BR",
-        args=["--start-maximized"],
-    )
-    update(status="ready", message="Chrome exclusivo aberto e pronto.")
+    launch_options: dict[str, object] = {
+        "user_data_dir": str(PROFILE),
+        "headless": BROWSER_HEADLESS,
+        "viewport": {"width": 1440, "height": 900},
+        "locale": "pt-BR",
+        "args": ["--disable-dev-shm-usage", "--no-sandbox"],
+    }
+    if BROWSER_CHANNEL and BROWSER_CHANNEL != "chromium":
+        launch_options["channel"] = BROWSER_CHANNEL
+    context = await playwright.chromium.launch_persistent_context(**launch_options)
+    mode = "na VPS" if BROWSER_HEADLESS else "neste computador"
+    update(status="ready", message=f"Executor do navegador pronto {mode}.")
     event("BROWSER_STARTED")
     return context
 
@@ -1064,7 +1072,41 @@ async def health() -> dict[str, str]:
 
 @app.get("/status")
 async def get_status() -> dict[str, object]:
-    return state
+    return {**state, "service_online": True, "executor_mode": "vps" if BROWSER_HEADLESS else "local"}
+
+
+@app.get("/metrics")
+async def get_metrics() -> dict[str, object]:
+    jobs = load_json(RESULTS, [])
+    applications = load_json(APPLICATIONS, [])
+    event_count = 0
+    if LOGS.exists():
+        with LOGS.open("r", encoding="utf-8") as handle:
+            event_count = sum(1 for line in handle if line.strip())
+    decisions: dict[str, int] = {}
+    statuses: dict[str, int] = {}
+    sources: dict[str, int] = {}
+    for job in jobs:
+        decision = str(job.get("decision") or "PENDING")
+        decisions[decision] = decisions.get(decision, 0) + 1
+        source = str(job.get("source") or "UNKNOWN")
+        sources[source] = sources.get(source, 0) + 1
+    for application in applications:
+        status = str(application.get("status") or "UNKNOWN")
+        statuses[status] = statuses.get(status, 0) + 1
+    return {
+        "service_online": True,
+        "executor_mode": "vps" if BROWSER_HEADLESS else "local",
+        "status": state.get("status", "unknown"),
+        "jobs": len(jobs),
+        "applications": len(applications),
+        "blocked": int(state.get("blocked", 0) or 0),
+        "decisions": decisions,
+        "application_statuses": statuses,
+        "sources": sources,
+        "events": event_count,
+        "updated_at": state.get("updated_at"),
+    }
 
 
 @app.get("/ai/status")
