@@ -86,7 +86,7 @@ class CommunicationInput(BaseModel):
     thread_id: str | None = Field(default=None, max_length=255)
     sender: str = Field(min_length=3, max_length=500)
     subject: str = Field(min_length=1, max_length=500)
-    category: Literal["INTERVIEW", "OFFER", "REJECTION", "RECRUITER", "QUESTIONNAIRE", "OTHER"]
+    category: str = Field(min_length=2, max_length=40, pattern=r"^[A-Z][A-Z_]+$")
     confidence: int = Field(ge=0, le=100)
     received_at: datetime
 

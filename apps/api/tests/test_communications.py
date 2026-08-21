@@ -1,4 +1,5 @@
 from src.communications import correlate_message, email_domain, notification_priority
+from src.career import CommunicationInput
 
 
 def test_extracts_sender_domain():
@@ -25,3 +26,12 @@ def test_ambiguous_match_requires_review():
 
 def test_interview_is_urgent():
     assert notification_priority("INTERVIEW") == "URGENT"
+
+
+def test_accepts_new_internal_category_without_rejecting_batch():
+    item = CommunicationInput(
+        provider_message_id="m1", sender="rh@example.com", subject="Recebida",
+        category="APPLICATION_CONFIRMED", confidence=90,
+        received_at="2026-08-21T00:00:00Z",
+    )
+    assert item.category == "APPLICATION_CONFIRMED"
