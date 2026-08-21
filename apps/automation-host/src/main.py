@@ -50,6 +50,11 @@ EXECUTOR_ID = os.getenv("EXECUTOR_ID", "local-browser")
 BROWSER_HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() in {"1", "true", "yes"}
 BROWSER_CHANNEL = os.getenv("BROWSER_CHANNEL", "chrome").strip().lower()
 
+EXTERNAL_APPLY_CTA_PATTERN = (
+    r"quero me candidatar|candidatura f[aá]cil|candidatar(?:-se)?|inscrever|"
+    r"apply now|apply for this|apply|easy apply|tenho interesse"
+)
+
 INTERVENTION_PATTERNS = {
     "CAPTCHA": re.compile(r"captcha|recaptcha|não sou um robô", re.IGNORECASE),
     "MFA": re.compile(r"verification code|two-factor|multi-factor|código de verificação|autenticação em duas etapas", re.IGNORECASE),
@@ -908,13 +913,17 @@ async def dismiss_overlays(page: Page) -> list[str]:
 
 
 async def search_roots(page: Page) -> list[Page | Frame]:
-    """Greenhouse/Lever/Ashby costumam embutir o formulário de candidatura
-    num <iframe>. Só incluímos frames como raiz de busca quando o host é um
-    ATS estruturado conhecido, para não alterar o comportamento em sites sem
-    iframe (LinkedIn, Indeed, Catho, InfoJobs, portais próprios)."""
-    if not detect_ats(page.url):
+    """Greenhouse/Lever/Ashby tanto podem hospedar a vaga diretamente (o
+    dominio da propria pagina ja e o ATS) quanto ficar embutidos num
+    <iframe> dentro do site da empresa (a pagina principal continua no
+    dominio da empresa, mas um dos iframes aponta para o ATS). Por isso
+    verificamos a URL de cada frame, nao so a da pagina principal, antes de
+    decidir se vale a pena expandir a busca — em qualquer site sem um frame
+    de ATS conhecido, o comportamento fica identico ao atual ([page])."""
+    ats_frames = [frame for frame in page.frames[1:] if detect_ats(frame.url)]
+    if not detect_ats(page.url) and not ats_frames:
         return [page]
-    return [page, *page.frames[1:]]
+    return [page, *ats_frames]
 
 
 async def click_first_visible(page: Page, pattern: str) -> bool:
@@ -1058,9 +1067,7 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                     action_href = await candidate_link.get_attribute("href")
                     if action_href:
                         break
-            action_clicked = await click_first_visible(
-                page, r"quero me candidatar|candidatura f[aá]cil|candidatar(?:-se)?|inscrever|apply now|easy apply|tenho interesse"
-            )
+            action_clicked = await click_first_visible(page, EXTERNAL_APPLY_CTA_PATTERN)
             if action_clicked:
                 await page.wait_for_timeout(1800)
                 opened_pages = [candidate for candidate in browser.pages if candidate not in pages_before_action]
@@ -1082,7 +1089,11 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 application["reason"] = "Ignorada: plataforma bloqueada pelo usuÃ¡rio."
                 remember_layout(application, "blocked_platform", {"platform": "gupy"})
                 continue
-            ats_match = detect_ats(page.url) or (detect_ats(action_href) if action_href else None)
+            roots = await search_roots(page)
+            ats_match = (
+                next((match for root in roots if (match := detect_ats(root.url))), None)
+                or (detect_ats(action_href) if action_href else None)
+            )
             application["detected_ats"] = ats_match.adapter if ats_match else None
             application["detected_ats_account"] = ats_match.account_key if ats_match else None
             if ats_match:
@@ -1090,7 +1101,7 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
             filled: list[str] = []
             ai_filled: list[dict[str, object]] = []
             unknown: list[str] = []
-            for root in await search_roots(page):
+            for root in roots:
                 filled.extend(await fill_known_fields(root, profile))
                 ai_result = await ai_fill_simple_questions(root, profile, application)
                 ai_filled.extend(ai_result.get("filled", []))

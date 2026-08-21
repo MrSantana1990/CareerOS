@@ -22,9 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from playwright.async_api import async_playwright  # noqa: E402
 
 from src.ats_detection import detect_ats  # noqa: E402
-from src.main import click_first_visible, search_roots  # noqa: E402
+from src.main import EXTERNAL_APPLY_CTA_PATTERN, click_first_visible, search_roots  # noqa: E402
 
-CTA_PATTERN = r"quero me candidatar|candidatura f[aá]cil|candidatar(?:-se)?|inscrever|apply now|easy apply|tenho interesse"
 SCREENSHOT_DIR = Path(__file__).resolve().parent / "manual-ats-check-output"
 
 
@@ -47,7 +46,7 @@ async def check(url: str) -> None:
         roots = await search_roots(page)
         print(f"search_roots -> {len(roots)} raiz(es) (1 = só page; >1 = page + iframe(s) de ATS)")
 
-        clicked = await click_first_visible(page, CTA_PATTERN)
+        clicked = await click_first_visible(page, EXTERNAL_APPLY_CTA_PATTERN)
         print(f"click_first_visible(CTA) -> {clicked}")
         await page.wait_for_timeout(1500)
 
