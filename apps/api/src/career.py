@@ -4,14 +4,16 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import urllib.request
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from .database import SessionLocal
 from .auth import require_admin
-from .quality import job_fingerprint, score_job, transition_allowed
+from .quality import job_fingerprint, normalize, score_job, transition_allowed
+from .preparation import application_strategy, idempotency_key, prepare_email_draft, route_resume
 
 router = APIRouter(prefix="/api/v1", tags=["career"])
 
@@ -93,6 +95,16 @@ class DiscoveryRunInput(BaseModel):
     created_count: int = Field(default=0, ge=0)
     deduplicated_count: int = Field(default=0, ge=0)
     error_message: str | None = Field(default=None, max_length=2000)
+
+
+class ApprovedAnswerInput(BaseModel):
+    question: str = Field(min_length=3, max_length=500)
+    category: Literal["salary", "availability", "remote_work", "implementation", "requirements",
+                      "stakeholders", "database", "cloud", "support", "data", "languages",
+                      "management", "travel", "on_call"]
+    approved_answer: str | None = Field(default=None, max_length=4000)
+    language: str = Field(default="pt-BR", min_length=2, max_length=10)
+    verified: bool = False
 
 
 async def organization_id(slug: str) -> UUID:
@@ -182,6 +194,216 @@ async def report_discovery_run(connection_id: UUID, payload: DiscoveryRunInput,
             """), {"connection_id": connection_id, "error_message": payload.error_message})
         await session.commit()
     return {"run_id": run_id, "status": payload.status}
+
+
+@router.get("/answers")
+async def list_answers(slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        rows = (await session.execute(text("""
+            SELECT id, normalized_question, category, approved_answer, language, verified,
+                   usage_count, last_reviewed_at
+            FROM application_questions WHERE organization_id=:organization_id
+            ORDER BY category, normalized_question
+        """), {"organization_id": org_id})).mappings()
+    return [dict(row) for row in rows]
+
+
+@router.put("/answers")
+async def save_answer(payload: ApprovedAnswerInput, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    if payload.verified and not payload.approved_answer:
+        raise HTTPException(status_code=422, detail="Resposta verificada não pode ficar vazia.")
+    values = {**payload.model_dump(), "organization_id": org_id,
+              "normalized_question": normalize(payload.question)}
+    async with SessionLocal() as session:
+        row = (await session.execute(text("""
+            INSERT INTO application_questions
+              (id, organization_id, normalized_question, category, approved_answer, language,
+               verified, last_reviewed_at)
+            VALUES (gen_random_uuid(), :organization_id, :normalized_question, :category,
+                    :approved_answer, :language, :verified,
+                    CASE WHEN :verified THEN now() ELSE NULL END)
+            ON CONFLICT (organization_id, normalized_question, language) DO UPDATE SET
+              category=EXCLUDED.category, approved_answer=EXCLUDED.approved_answer,
+              verified=EXCLUDED.verified,
+              last_reviewed_at=CASE WHEN EXCLUDED.verified THEN now() ELSE application_questions.last_reviewed_at END,
+              updated_at=now()
+            RETURNING id, normalized_question, category, approved_answer, language, verified,
+                      usage_count, last_reviewed_at
+        """), values)).mappings().one()
+        await session.commit()
+    return dict(row)
+
+
+@router.get("/answers/match")
+async def match_answer(question: str = Query(min_length=3, max_length=500), language: str = "pt-BR",
+                       slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        row = (await session.execute(text("""
+            UPDATE application_questions SET usage_count=usage_count+1, updated_at=now()
+            WHERE organization_id=:organization_id AND normalized_question=:question
+              AND language=:language AND verified=true AND approved_answer IS NOT NULL
+            RETURNING id, category, approved_answer, language, verified, usage_count
+        """), {"organization_id": org_id, "question": normalize(question),
+                "language": language})).mappings().first()
+        if row:
+            await session.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="Resposta aprovada não encontrada; revisão humana necessária.")
+    return dict(row)
+
+
+@router.post("/jobs/{job_id}/prepare")
+async def prepare_application(job_id: UUID, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        job = (await session.execute(text("""
+            SELECT j.*, c.name AS company, s.total AS score, s.decision
+            FROM jobs j JOIN companies c ON c.id=j.company_id
+            LEFT JOIN LATERAL (
+              SELECT total, decision FROM job_scores WHERE job_id=j.id ORDER BY created_at DESC LIMIT 1
+            ) s ON true
+            WHERE j.id=:job_id AND j.organization_id=:organization_id AND j.deleted_at IS NULL
+        """), {"job_id": job_id, "organization_id": org_id})).mappings().first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Vaga não encontrada.")
+        if job["validation_status"] != "OPEN" or not job["score"] or job["score"] < 75 or job["decision"] in {"BLOCK", "DISCARD"}:
+            raise HTTPException(status_code=409, detail="Vaga não está qualificada para preparação.")
+        resumes = list((await session.execute(text("""
+            SELECT rv.id, rv.version, rv.sha256, rv.storage_key, rv.approved_at,
+                   r.family, r.language, r.active
+            FROM resume_versions rv JOIN resumes r ON r.id=rv.resume_id
+            WHERE rv.organization_id=:organization_id AND r.deleted_at IS NULL
+        """), {"organization_id": org_id})).mappings())
+        selected = route_resume(dict(job), [dict(item) for item in resumes])
+        if not selected:
+            raise HTTPException(status_code=409, detail="Nenhum currículo aprovado e ativo disponível.")
+        strategy = application_strategy(dict(job))
+        key = idempotency_key(str(org_id), str(job_id))
+        existing = (await session.execute(text("""
+            SELECT a.id, a.status, a.strategy, a.resume_version_id, a.resume_hash,
+                   d.id AS draft_id, d.recipient, d.subject, d.body, d.status AS draft_status
+            FROM applications a LEFT JOIN application_drafts d ON d.application_id=a.id
+            WHERE a.organization_id=:organization_id AND a.job_id=:job_id
+        """), {"organization_id": org_id, "job_id": job_id})).mappings().first()
+        if existing:
+            draft = None if not existing["draft_id"] else {
+                "id": existing["draft_id"], "recipient": existing["recipient"],
+                "subject": existing["subject"], "body": existing["body"],
+                "status": existing["draft_status"],
+            }
+            return {"application": {key: existing[key] for key in
+                    ("id", "status", "strategy", "resume_version_id", "resume_hash")},
+                    "resume_family": selected["family"], "draft": draft, "sent": False,
+                    "idempotent_replay": True}
+        application = (await session.execute(text("""
+            INSERT INTO applications
+              (id, organization_id, job_id, resume_version_id, resume_hash, status, channel,
+               strategy, idempotency_key, automation_mode, prepared_at)
+            VALUES (gen_random_uuid(), :organization_id, :job_id, :resume_version_id, :resume_hash,
+                    'PREPARING', :strategy, :strategy, :idempotency_key, 'ASSISTED', now())
+            RETURNING id, status, strategy, resume_version_id, resume_hash
+        """), {"organization_id": org_id, "job_id": job_id,
+                "resume_version_id": selected["id"], "resume_hash": selected["sha256"],
+                "strategy": strategy, "idempotency_key": key})).mappings().one()
+        draft = None
+        if strategy == "EMAIL":
+            profile = (await session.execute(text("""
+                SELECT u.full_name FROM users u
+                WHERE u.organization_id=:organization_id AND u.status='ACTIVE' LIMIT 1
+            """), {"organization_id": org_id})).mappings().first() or {}
+            email = prepare_email_draft(dict(job), dict(profile))
+            draft = (await session.execute(text("""
+                INSERT INTO application_drafts
+                  (id, organization_id, application_id, recipient, subject, body, status)
+                VALUES (gen_random_uuid(), :organization_id, :application_id, :recipient,
+                        :subject, :body, 'REVIEW_REQUIRED')
+                ON CONFLICT (application_id) DO UPDATE SET recipient=EXCLUDED.recipient,
+                  subject=EXCLUDED.subject, body=EXCLUDED.body, status='REVIEW_REQUIRED',
+                  approved_at=NULL, updated_at=now()
+                RETURNING id, recipient, subject, body, status
+            """), {"organization_id": org_id, "application_id": application["id"],
+                    "recipient": email.recipient, "subject": email.subject, "body": email.body})).mappings().one()
+        await session.execute(text("""
+            INSERT INTO application_events
+              (id, organization_id, application_id, event_type, to_status, actor,
+               automation_mode, reason, evidence)
+            VALUES (gen_random_uuid(), :organization_id, :application_id, 'APPLICATION_PREPARED',
+                    'PREPARING', 'SYSTEM', 'ASSISTED', 'Preparação sem envio',
+                    jsonb_build_object('strategy', :strategy, 'resume_hash', :resume_hash))
+        """), {"organization_id": org_id, "application_id": application["id"],
+                "strategy": strategy, "resume_hash": selected["sha256"]})
+        await session.commit()
+    return {"application": dict(application), "resume_family": selected["family"],
+            "draft": dict(draft) if draft else None, "sent": False}
+
+
+@router.post("/applications/{application_id}/draft/approve")
+async def approve_application_draft(application_id: UUID,
+                                    slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        draft = (await session.execute(text("""
+            UPDATE application_drafts SET status='APPROVED', approved_at=now(), updated_at=now()
+            WHERE application_id=:application_id AND organization_id=:organization_id
+              AND status='REVIEW_REQUIRED'
+            RETURNING id, recipient, subject, body, status, approved_at
+        """), {"application_id": application_id, "organization_id": org_id})).mappings().first()
+        if not draft:
+            raise HTTPException(status_code=404, detail="Rascunho pendente não encontrado.")
+        await session.execute(text("""
+            INSERT INTO application_events
+              (id, organization_id, application_id, event_type, from_status, to_status,
+               actor, automation_mode, reason, evidence)
+            VALUES (gen_random_uuid(), :organization_id, :application_id, 'DRAFT_APPROVED',
+                    'PREPARING', 'READY', 'USER', 'ASSISTED', 'Rascunho aprovado manualmente', '{}')
+        """), {"organization_id": org_id, "application_id": application_id})
+        await session.execute(text("""
+            UPDATE applications SET status='READY', updated_at=now() WHERE id=:application_id
+        """), {"application_id": application_id})
+        await session.commit()
+    return {**dict(draft), "sent": False}
+
+
+@router.post("/applications/{application_id}/draft/materialize")
+async def materialize_application_draft(application_id: UUID,
+                                        slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        row = (await session.execute(text("""
+            SELECT d.id, d.recipient, d.subject, d.body, d.status, d.provider_draft_id,
+                   rv.storage_key
+            FROM application_drafts d JOIN applications a ON a.id=d.application_id
+            JOIN resume_versions rv ON rv.id=a.resume_version_id
+            WHERE d.application_id=:application_id AND d.organization_id=:organization_id
+        """), {"application_id": application_id,
+                "organization_id": org_id})).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Rascunho não encontrado.")
+        if row["provider_draft_id"]:
+            return {"draft_id": row["provider_draft_id"], "status": "MATERIALIZED",
+                    "sent": False, "idempotent_replay": True}
+        if row["status"] != "APPROVED":
+            raise HTTPException(status_code=409, detail="O rascunho exige aprovação humana.")
+        request = urllib.request.Request(
+            os.getenv("INTEGRATIONS_URL", "http://integrations:8765") + "/google/application-draft",
+            data=json.dumps({"recipient": row["recipient"], "subject": row["subject"],
+                             "body": row["body"], "resume_path": row["storage_key"]}).encode(),
+            method="POST", headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=45) as response:
+                provider = json.loads(response.read().decode())
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail="Gmail não criou o rascunho.") from exc
+        await session.execute(text("""
+            UPDATE application_drafts SET status='MATERIALIZED', provider_draft_id=:provider_id,
+              updated_at=now() WHERE id=:id
+        """), {"provider_id": provider["draft_id"], "id": row["id"]})
+        await session.commit()
+    return {"draft_id": provider["draft_id"], "status": "MATERIALIZED", "sent": False}
 
 
 @router.post("/jobs")
@@ -364,7 +586,13 @@ async def save_profile(payload: ProfileInput, slug: str = Depends(require_admin)
 
 
 @router.post("/profile/resume")
-async def upload_resume(file: UploadFile = File(...), slug: str = Depends(require_admin)) -> dict[str, str]:
+async def upload_resume(
+    file: UploadFile = File(...),
+    family: Literal["GENERAL", "PT_SUPPORT_SENIOR", "PT_DBA_SQL", "PT_DATA",
+                    "EN_SUPPORT_DATABASE", "EN_DATA_DATABASE", "EN_DATA_ENGINEERING"] = "GENERAL",
+    language: Literal["pt-BR", "en"] = "pt-BR",
+    slug: str = Depends(require_admin),
+) -> dict[str, str]:
     org_id = await organization_id(slug)
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in {".pdf", ".docx"}:
@@ -380,17 +608,20 @@ async def upload_resume(file: UploadFile = File(...), slug: str = Depends(requir
     async with SessionLocal() as session:
         resume_id = await session.scalar(text("""
             INSERT INTO resumes (id, organization_id, code, name, family, language, active)
-            VALUES (gen_random_uuid(), :organization_id, 'CURRENT', :name, 'GENERAL', 'pt-BR', true)
-            ON CONFLICT (organization_id, code) DO UPDATE SET name = EXCLUDED.name, updated_at = now()
+            VALUES (gen_random_uuid(), :organization_id, :family, :name, :family, :language, true)
+            ON CONFLICT (organization_id, code) DO UPDATE SET name = EXCLUDED.name,
+              family=EXCLUDED.family, language=EXCLUDED.language, active=true, updated_at=now()
             RETURNING id
-        """), {"organization_id": org_id, "name": file.filename or f"curriculo{suffix}"})
+        """), {"organization_id": org_id, "name": file.filename or f"curriculo{suffix}",
+                "family": family, "language": language})
         version = (await session.scalar(text("SELECT COALESCE(max(version), 0) + 1 FROM resume_versions WHERE resume_id = :resume_id"), {"resume_id": resume_id})) or 1
         await session.execute(text("""
             INSERT INTO resume_versions (id, organization_id, resume_id, version, storage_key, sha256, approved_at)
             VALUES (gen_random_uuid(), :organization_id, :resume_id, :version, :storage_key, :sha256, now())
         """), {"organization_id": org_id, "resume_id": resume_id, "version": version, "storage_key": str(target), "sha256": digest})
         await session.commit()
-    return {"resume_path": str(target), "resume_name": file.filename or target.name}
+    return {"resume_path": str(target), "resume_name": file.filename or target.name,
+            "family": family, "language": language}
 
 
 @router.get("/career-rules")

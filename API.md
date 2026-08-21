@@ -37,6 +37,11 @@ Swagger: `http://localhost:8765/docs`.
 - `GET /api/v1/sources` — lista configurações de fontes estruturadas
 - `POST /api/v1/sources` — cria ou atualiza uma fonte, desligada por padrão
 - `POST /api/v1/sources/{connection_id}/runs` — registra execução e resultado do worker
+- `GET/PUT /api/v1/answers` — lista ou grava respostas aprovadas
+- `GET /api/v1/answers/match` — retorna somente uma resposta verificada exata
+- `POST /api/v1/jobs/{job_id}/prepare` — prepara candidatura idempotente e escolhe currículo/estratégia
+- `POST /api/v1/applications/{application_id}/draft/approve` — registra aprovação humana
+- `POST /api/v1/applications/{application_id}/draft/materialize` — cria rascunho no Gmail, sem enviar
 - `GET /metrics`
 - Swagger em `/docs`
 

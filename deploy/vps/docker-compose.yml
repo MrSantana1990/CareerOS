@@ -109,8 +109,10 @@ services:
     environment:
       CAREER_RUNTIME: /data/runtime
       LOCAL_AI_URL: http://127.0.0.1:8080/v1
+      RESUME_STORAGE_DIR: /data/resumes
     volumes:
       - integrations_data:/data/runtime
+      - resume_data:/data/resumes:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health')"]
       interval: 15s

@@ -35,6 +35,22 @@ def connection_status(token_path: Path) -> dict:
     return {"connected": True, "email": profile.get("emailAddress"), "calendar": True}
 
 
+def create_application_email_draft(token_path: Path, recipient: str, subject: str, body: str,
+                                   resume_path: Path) -> dict:
+    credentials = _credentials(token_path)
+    gmail = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+    message = EmailMessage()
+    message["To"] = recipient
+    message["Subject"] = subject
+    message.set_content(body)
+    subtype = "pdf" if resume_path.suffix.lower() == ".pdf" else "vnd.openxmlformats-officedocument.wordprocessingml.document"
+    message.add_attachment(resume_path.read_bytes(), maintype="application", subtype=subtype,
+                           filename=resume_path.name)
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    draft = gmail.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
+    return {"draft_id": draft["id"]}
+
+
 def _headers(payload: dict) -> dict[str, str]:
     return {item.get("name", "").lower(): item.get("value", "") for item in payload.get("headers", [])}
 

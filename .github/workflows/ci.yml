@@ -50,11 +50,12 @@ jobs:
           cache-dependency-path: apps/api/pyproject.toml
       - run: pip install -e "apps/api[dev]"
       - run: pip install -e "apps/worker[dev]"
-      - run: ruff check apps/api apps/worker
+      - run: ruff check apps/api apps/worker apps/automation-host
       - run: pytest apps/api/tests -q
       - run: pytest tests -q
         working-directory: apps/worker
       - run: python -m compileall -q apps/api/src apps/api/migrations
+      - run: python -m compileall -q apps/automation-host/src
       - name: Executar migrações em PostgreSQL real
         working-directory: apps/api
         env:
@@ -78,6 +79,8 @@ jobs:
         run: docker build -t helpsystem-carreira-api:ci apps/api
       - name: Construir worker
         run: docker build -t helpsystem-carreira-worker:ci apps/worker
+      - name: Construir integrações
+        run: docker build -t helpsystem-carreira-integrations:ci apps/automation-host
       - name: Construir painel
         run: >
           docker build
