@@ -1,54 +1,74 @@
-# Arquitetura
+# HelpSystem Career AI — Arquitetura
 
-## Visão geral
+> Arquitetura real e alvo incremental · Fase 0
 
-CareerOS é um monorepo local-first com dois caminhos complementares:
+## Princípio
 
-- `apps/web` fornece o painel Next.js e encaminha `/agent/*` para o host local.
-- `apps/automation-host` coordena Playwright, perfil, vagas, candidaturas, IA local, Gmail e Agenda.
-- `apps/api`, `apps/worker`, PostgreSQL, Redis, Prometheus e Grafana formam a fundação para persistência e observabilidade estruturadas.
+O produto é **VPS-first**. Nenhum fluxo periódico depende do Windows. Interações inseguras ou impossíveis na VPS viram `MANUAL_REQUIRED` e são resolvidas pelo usuário no navegador ou celular.
 
-```mermaid
-sequenceDiagram
-    actor User as Usuário
-    participant UI as Next.js :3000
-    participant Host as FastAPI :8765
-    participant Chrome as Chrome/Playwright
-    participant AI as IA local :8080
-    participant Google as Gmail/Calendar
+## Produção atual
 
-    User->>UI: PLAY / verificar e-mails
-    UI->>Host: API local
-    Host->>Chrome: buscar, inspecionar e preencher
-    Host->>AI: responder com perfil comprovado
-    Host->>Google: ler alertas / criar rascunho ou evento
-    Host-->>UI: estado, evidência e feedback
+```text
+Internet
+  └─ Cloudflare Tunnel
+      └─ 127.0.0.1:8093
+          └─ web (Next.js/PWA + sessão + BFF)
+              ├─ api (FastAPI Core)
+              │   ├─ PostgreSQL/pgvector
+              │   └─ currículo privado
+              └─ integrations (FastAPI Google + legado Playwright)
+
+Redis ── worker Dramatiq
 ```
 
-## Estado local
-
-`.runtime/` concentra perfil profissional, currículo importado, vagas, fila de candidaturas, decisões da IA, conhecimento de layout, token Google e alertas. Essa pasta nunca deve ser versionada.
-
-Arquivos principais:
-
-- `professional-profile.json`: fatos aprovados sobre o candidato.
-- `jobs.json`: vagas coletadas e analisadas.
-- `applications.json`: estado e evidência de cada candidatura.
-- `automation-events.jsonl`: trilha de execução.
-- `layout-knowledge.json`: impedimentos e aprendizado de layouts.
-- `google/career-mail.json`: classificação local de mensagens.
+Somente `web` publica porta, ligada ao loopback. PostgreSQL, Redis, API e integrações permanecem privadas. `integrations` possui saída para as APIs Google, mas nenhuma porta publicada.
 
 ## Limites de confiança
 
-O host separa descoberta, análise, preparação e submissão. A IA local responde apenas com evidência do perfil; confiança inferior ao limite vira intervenção. CAPTCHA, MFA, teste, pergunta sensível ou confirmação ambígua interrompem o fluxo.
+| Zona | Conteúdo | Regra |
+|---|---|---|
+| Navegador | sessão do portal | nunca recebe token administrativo |
+| Web/BFF | sessão e chamadas internas | credencial somente server-side |
+| Core | regras e domínio | isolamento por organização |
+| Dados | PostgreSQL e volumes | sem portas públicas |
+| Integrações | OAuth e mensagens | tokens fora do Git/frontend |
+| Browser futuro | cookies/screenshots | processo e volume isolados |
 
-## Integrações
+## Persistência
 
-- Chrome persistente: perfil dedicado em `.runtime/browser-profiles/default`.
-- IA: API compatível com OpenAI em `LOCAL_AI_URL`, normalmente llama.cpp em `127.0.0.1:8080/v1`.
-- Google: OAuth Desktop com credenciais e token em `.runtime/google/`.
-- Plataformas: adaptadores e seletores isolados no automation host.
+- PostgreSQL é a fonte da verdade do domínio.
+- Redis é broker transitório, nunca fonte da verdade.
+- `resume_data` armazena currículos versionados.
+- `integrations_data` armazena OAuth e cache Google.
+- `.runtime` local é legado e não integra a arquitetura definitiva.
 
-## Decisões
+## Arquitetura alvo
 
-Consulte [ADR 0001](docs/decisions/0001-modular-monorepo.md) e [IA e Google](docs/AI_AND_GOOGLE.md).
+```text
+Scheduler → Queue → Workers idempotentes
+     ├─ Source adapters → normalize → deduplicate → validate
+     ├─ Score/Rules → Decision Inbox
+     ├─ Resume/Answer routers → Application Strategy
+     ├─ Email/ATS/Browser executors → submission verification
+     └─ Gmail/Calendar/Notifications → pipeline/events/analytics
+```
+
+A prioridade é API autorizada, feed, página pública, parser HTTP e somente então navegador. Cada fonte e executor possui adapter próprio; não haverá script universal monolítico.
+
+## Estados canônicos alvo
+
+Vaga: `OPEN`, `UNCERTAIN`, `CLOSED`, `DUPLICATE`, `ALREADY_APPLIED`, `BLOCKED`, `MANUAL_REQUIRED`.
+
+Aplicação: `DISCOVERED`, `VALIDATING`, `VALIDATED`, `QUALIFIED`, `WAITING_DECISION`, `PREPARING`, `READY`, `SUBMITTING`, `SENT`, `CONFIRMED`, `RECRUITER_RESPONSE`, `INTERVIEW`, `TECHNICAL_TEST`, `FINAL_STAGE`, `OFFER`, `REJECTED`, `CLOSED`, `DISCARDED`, `ERROR`.
+
+## Autonomia
+
+- `AUTO`: tarefa determinística, comprovada e de baixo risco.
+- `ASSISTED`: decisão subjetiva ou de impacto vai para a Inbox.
+- `MANUAL`: CAPTCHA, MFA, teste, vídeo, consentimento ou fato desconhecido.
+
+Autoenvio só existe com as duas flags de segurança, regras validadas e canal autorizado. Confirmação do provedor é obrigatória antes de `SENT` ou `CONFIRMED`.
+
+## Deploy e rollback
+
+Deploy usa `main`, build, migrations transacionais, healthchecks e smoke tests públicos. Rollback de código usa imagem/commit anterior sem remover volumes. Migration destrutiva exige backup, restauração testada e plano específico. `down -v` é proibido em atualização comum.
