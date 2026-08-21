@@ -42,6 +42,10 @@ Swagger: `http://localhost:8765/docs`.
 - `POST /api/v1/jobs/{job_id}/prepare` — prepara candidatura idempotente e escolhe currículo/estratégia
 - `POST /api/v1/applications/{application_id}/draft/approve` — registra aprovação humana
 - `POST /api/v1/applications/{application_id}/draft/materialize` — cria rascunho no Gmail, sem enviar
+- `POST /api/v1/communications/sync` — persiste e correlaciona comunicações de recrutamento
+- `GET /api/v1/notifications` — lista alertas priorizados e deduplicados
+- `POST /api/v1/notifications/{notification_id}/read` — marca um alerta como lido
+- `POST /api/v1/followups/evaluate` — cria lembretes de revisão, sem enviar mensagens
 - `GET /metrics`
 - Swagger em `/docs`
 

@@ -446,6 +446,7 @@ body {
 .answer-list .badge { justify-self: start; }
 .answer-list p { margin: 0; }
 .answer-list small { color: var(--muted); }
+.topbar-actions{display:flex;align-items:center;gap:10px}.notification-button{border:1px solid var(--line);border-radius:9px;padding:10px 13px;background:#102638;color:#fff;cursor:pointer}.notification-button span{display:inline-grid;place-items:center;min-width:22px;height:22px;margin-left:6px;border-radius:99px;background:var(--accent);color:#06151d;font-weight:800}.notification-list{display:grid;gap:10px}.notification-list>button{display:grid;gap:7px;text-align:left;padding:15px;border:1px solid var(--line);border-radius:11px;background:#091722;color:#fff;cursor:pointer}.notification-list>button.urgent{border-color:#d55b68}.notification-list>button.high{border-color:#b88a3b}.notification-list>button.read{opacity:.58}.notification-list .badge{justify-self:start}.notification-list p{margin:0}.notification-list small{color:var(--muted)}
 .form .readonly {
   opacity: 0.7;
 }

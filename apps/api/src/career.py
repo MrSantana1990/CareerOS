@@ -1,6 +1,7 @@
 from typing import Any, Literal
 from uuid import UUID
 from pathlib import Path
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ from .database import SessionLocal
 from .auth import require_admin
 from .quality import job_fingerprint, normalize, score_job, transition_allowed
 from .preparation import application_strategy, idempotency_key, prepare_email_draft, route_resume
+from .communications import correlate_message, notification_priority
 
 router = APIRouter(prefix="/api/v1", tags=["career"])
 
@@ -77,6 +79,21 @@ class TransitionInput(BaseModel):
     automation_mode: Literal["AUTO", "ASSISTED", "MANUAL"] = "ASSISTED"
     reason: str = Field(default="", max_length=2000)
     evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class CommunicationInput(BaseModel):
+    provider_message_id: str = Field(min_length=1, max_length=255)
+    thread_id: str | None = Field(default=None, max_length=255)
+    sender: str = Field(min_length=3, max_length=500)
+    subject: str = Field(min_length=1, max_length=500)
+    category: Literal["INTERVIEW", "OFFER", "REJECTION", "RECRUITER", "QUESTIONNAIRE", "OTHER"]
+    confidence: int = Field(ge=0, le=100)
+    received_at: datetime
+
+
+class CommunicationBatch(BaseModel):
+    provider: Literal["GMAIL"] = "GMAIL"
+    items: list[CommunicationInput] = Field(max_length=500)
 
 
 class SourceConnectionInput(BaseModel):
@@ -735,3 +752,112 @@ async def decide(
     if not changed:
         raise HTTPException(status_code=404, detail="Decisão pendente não encontrada.")
     return {"status": payload.decision}
+
+
+@router.post("/communications/sync")
+async def sync_communications(batch: CommunicationBatch, slug: str = Depends(require_admin)) -> dict[str, int]:
+    org_id = await organization_id(slug)
+    matched = unmatched = notifications = 0
+    async with SessionLocal() as session:
+        rows = (await session.execute(text("""
+            SELECT a.id, j.title, c.name AS company, c.domain AS company_domain
+            FROM applications a JOIN jobs j ON j.id=a.job_id
+            LEFT JOIN companies c ON c.id=j.company_id
+            WHERE a.organization_id=:organization_id AND a.deleted_at IS NULL
+              AND a.status NOT IN ('CLOSED', 'WITHDRAWN')
+        """), {"organization_id": org_id})).mappings()
+        candidates = [dict(item) for item in rows]
+        for item_model in batch.items:
+            item = item_model.model_dump()
+            application_id, evidence = correlate_message(item, candidates)
+            correlation_status = "MATCHED" if application_id else "REVIEW" if evidence == ["ambiguous"] else "UNMATCHED"
+            matched += int(bool(application_id))
+            unmatched += int(not application_id)
+            await session.execute(text("""
+                INSERT INTO recruitment_communications
+                  (id, organization_id, application_id, provider, provider_message_id,
+                   thread_id, sender, subject, category, confidence, received_at,
+                   correlation_status, evidence)
+                VALUES (gen_random_uuid(), :organization_id, :application_id, :provider,
+                        :provider_message_id, :thread_id, :sender, :subject, :category,
+                        :confidence, :received_at, :correlation_status,
+                        CAST(:evidence AS jsonb))
+                ON CONFLICT (organization_id, provider, provider_message_id) DO UPDATE SET
+                  application_id=EXCLUDED.application_id, category=EXCLUDED.category,
+                  confidence=EXCLUDED.confidence, correlation_status=EXCLUDED.correlation_status,
+                  evidence=EXCLUDED.evidence, updated_at=now()
+            """), {**item, "organization_id": org_id, "application_id": application_id,
+                    "provider": batch.provider, "correlation_status": correlation_status,
+                    "evidence": json.dumps({"signals": evidence})})
+            if item["category"] != "OTHER":
+                result = await session.execute(text("""
+                    INSERT INTO career_notifications
+                      (id, organization_id, application_id, kind, title, body, priority, deduplication_key)
+                    VALUES (gen_random_uuid(), :organization_id, :application_id, :kind,
+                            :title, :body, :priority, :deduplication_key)
+                    ON CONFLICT (organization_id, deduplication_key) DO NOTHING RETURNING id
+                """), {"organization_id": org_id, "application_id": application_id,
+                        "kind": item["category"], "title": f"Atualização: {item['category'].title()}",
+                        "body": "Há uma nova comunicação de recrutamento para revisar no portal.",
+                        "priority": notification_priority(item["category"]),
+                        "deduplication_key": f"gmail:{item['provider_message_id']}"})
+                notifications += int(result.first() is not None)
+        await session.commit()
+    return {"processed": len(batch.items), "matched": matched, "unmatched": unmatched, "notifications": notifications}
+
+
+@router.get("/notifications")
+async def list_notifications(unread_only: bool = Query(default=False), slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        rows = (await session.execute(text("""
+            SELECT id, application_id, kind, title, body, priority, read_at, created_at
+            FROM career_notifications WHERE organization_id=:organization_id
+              AND (:unread_only=false OR read_at IS NULL)
+            ORDER BY read_at NULLS FIRST, CASE priority WHEN 'URGENT' THEN 1 WHEN 'HIGH' THEN 2 ELSE 3 END,
+              created_at DESC LIMIT 100
+        """), {"organization_id": org_id, "unread_only": unread_only})).mappings()
+    return [dict(row) for row in rows]
+
+
+@router.post("/notifications/{notification_id}/read")
+async def mark_notification_read(notification_id: UUID, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        row = (await session.execute(text("""
+            UPDATE career_notifications SET read_at=COALESCE(read_at, now())
+            WHERE id=:id AND organization_id=:organization_id RETURNING id, read_at
+        """), {"id": notification_id, "organization_id": org_id})).mappings().first()
+        await session.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="Notificação não encontrada.")
+    return dict(row)
+
+
+@router.post("/followups/evaluate")
+async def evaluate_followups(slug: str = Depends(require_admin)) -> dict[str, int]:
+    """Creates review reminders only; it never sends a follow-up."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        due = list((await session.execute(text("""
+            SELECT a.id, j.title FROM applications a JOIN jobs j ON j.id=a.job_id
+            WHERE a.organization_id=:organization_id AND a.applied_at IS NOT NULL
+              AND a.applied_at <= now() - interval '7 days'
+              AND a.status NOT IN ('CLOSED', 'WITHDRAWN', 'OFFER')
+              AND NOT EXISTS (SELECT 1 FROM recruitment_communications rc
+                              WHERE rc.application_id=a.id AND rc.received_at >= a.applied_at)
+        """), {"organization_id": org_id})).mappings())
+        created = 0
+        for item in due:
+            result = await session.execute(text("""
+                INSERT INTO career_notifications
+                  (id, organization_id, application_id, kind, title, body, priority, deduplication_key)
+                VALUES (gen_random_uuid(), :organization_id, :application_id, 'FOLLOWUP_DUE',
+                        'Follow-up disponível para revisão', :body, 'NORMAL', :key)
+                ON CONFLICT (organization_id, deduplication_key) DO NOTHING RETURNING id
+            """), {"organization_id": org_id, "application_id": item["id"],
+                    "body": f"A candidatura para {item['title']} está sem resposta há pelo menos 7 dias.",
+                    "key": f"followup:{item['id']}:7d"})
+            created += int(result.first() is not None)
+        await session.commit()
+    return {"eligible": len(due), "notifications": created, "sent": 0}

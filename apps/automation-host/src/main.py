@@ -39,6 +39,8 @@ GOOGLE_INBOX = RUNTIME / "google" / "career-mail.json"
 GOOGLE_STATUS_CACHE = RUNTIME / "google" / "connection-status.json"
 LOCAL_AI_URL = os.getenv("LOCAL_AI_URL", "http://127.0.0.1:8080/v1")
 RESUME_STORAGE = Path(os.getenv("RESUME_STORAGE_DIR", "/data/resumes")).resolve()
+CAREER_API_URL = os.getenv("CAREER_API_URL", "http://api:8000").rstrip("/")
+CAREER_ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 
 PLATFORMS = {
     "InfoJobs": "https://www.infojobs.com.br/",
@@ -1018,6 +1020,27 @@ async def google_scan() -> dict:
         raise HTTPException(status_code=401, detail="Google ainda não autorizado.")
     try:
         result = await asyncio.to_thread(scan_recruitment_mail, GOOGLE_TOKEN, GOOGLE_INBOX, 90, 250)
+        if CAREER_ADMIN_TOKEN:
+            payload = {"provider": "GMAIL", "items": [{
+                "provider_message_id": item["message_id"],
+                "thread_id": item.get("thread_id"),
+                "sender": item.get("sender", ""),
+                "subject": item.get("subject", "(sem assunto)"),
+                "category": item.get("category", "OTHER"),
+                "confidence": item.get("confidence", 0),
+                "received_at": item["received_at"],
+            } for item in result["items"]]}
+            try:
+                request = Request(
+                    CAREER_API_URL + "/api/v1/communications/sync",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}",
+                             "Content-Type": "application/json"},
+                    method="POST",
+                )
+                await asyncio.to_thread(urlopen, request, 20)
+            except Exception as sync_error:
+                event("GOOGLE_CORE_SYNC_FAILED", error=type(sync_error).__name__)
         event("GOOGLE_MAIL_SCANNED", scanned=result["scanned"], discovered=result["discovered"])
         return result
     except Exception as exc:
