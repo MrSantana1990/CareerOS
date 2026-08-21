@@ -8,4 +8,6 @@ def test_external_application_switches_to_the_new_browser_tab() -> None:
 
     assert "pages_before_action = set(browser.pages)" in source
     assert "page = opened_pages[-1]" in source
+    assert "elif action_href:" in source
+    assert "urljoin(page.url, action_href)" in source
     assert source.count('if "gupy.io" in page.url.lower():') >= 2

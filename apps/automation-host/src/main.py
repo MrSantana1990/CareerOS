@@ -995,6 +995,16 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 continue
             dismissed = await dismiss_overlays(page)
             pages_before_action = set(browser.pages)
+            action_href = None
+            action_links = page.get_by_role(
+                "link", name=re.compile(r"candidatar|apply", re.IGNORECASE)
+            )
+            for link_index in range(min(await action_links.count(), 8)):
+                candidate_link = action_links.nth(link_index)
+                if await candidate_link.is_visible():
+                    action_href = await candidate_link.get_attribute("href")
+                    if action_href:
+                        break
             action_clicked = await click_first_visible(
                 page, r"quero me candidatar|candidatura f[aá]cil|candidatar(?:-se)?|inscrever|apply now|easy apply|tenho interesse"
             )
@@ -1007,6 +1017,12 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                         await page.wait_for_load_state("domcontentloaded", timeout=35_000)
                     except Exception:
                         pass
+                elif action_href:
+                    await page.goto(
+                        urljoin(page.url, action_href),
+                        wait_until="domcontentloaded",
+                        timeout=35_000,
+                    )
                 await dismiss_overlays(page)
             if "gupy.io" in page.url.lower():
                 application["status"] = "BLOCKED"
