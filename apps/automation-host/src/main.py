@@ -224,6 +224,28 @@ def _http_json(url: str, payload: dict | None = None, timeout: int = 8) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
+async def sync_profile_from_core() -> ProfessionalProfile | None:
+    if not CAREER_ADMIN_TOKEN:
+        return None
+
+    def fetch() -> dict:
+        request = Request(
+            CAREER_API_URL + "/api/v1/profile",
+            headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}"},
+        )
+        with urlopen(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    try:
+        profile = ProfessionalProfile.model_validate(await asyncio.to_thread(fetch))
+        save_json(PROFILE_DATA, profile.model_dump())
+        event("CORE_PROFILE_SYNCED", resume=bool(profile.resume_path), roles=len(profile.target_roles))
+        return profile
+    except (URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
+        event("CORE_PROFILE_SYNC_FAILED", error=type(exc).__name__)
+        return None
+
+
 async def local_ai_status() -> dict[str, object]:
     try:
         result = await asyncio.to_thread(_http_json, f"{LOCAL_AI_URL}/models", None, 3)
@@ -1017,7 +1039,9 @@ async def analyze_all_jobs(minimum_score: int) -> dict[str, int]:
 
 
 async def full_daily_pipeline() -> None:
-    profile = ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {}))
+    profile = await sync_profile_from_core()
+    if profile is None:
+        profile = ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {}))
     settings = AutomationSettings.model_validate(load_json(SETTINGS_DATA, {}))
     if not profile.full_name or not profile.email or not profile.resume_path:
         update(status="profile_required", message="Currículo ou contatos obrigatórios não foram extraídos.")
@@ -1060,6 +1084,7 @@ async def google_mail_scheduler() -> None:
 
 @app.on_event("startup")
 async def startup_scheduler() -> None:
+    await sync_profile_from_core()
     update(status="ready", message="Agente pronto. Próximas execuções automáticas: 08:00, 12:00 e 18:00.")
     asyncio.create_task(daily_scheduler())
     asyncio.create_task(google_mail_scheduler())
