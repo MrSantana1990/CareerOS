@@ -4,8 +4,10 @@ import { SESSION_COOKIE, validSession } from "./lib/portal-auth";
 export async function middleware(request: NextRequest) {
   const forwardedProtocol = request.headers.get("x-forwarded-proto");
   if (forwardedProtocol === "http") {
-    const secureUrl = request.nextUrl.clone();
-    secureUrl.protocol = "https:";
+    const publicHost = request.headers.get("x-forwarded-host")
+      ?? request.headers.get("host")
+      ?? "carreira.helpsystempro.site";
+    const secureUrl = new URL(`${request.nextUrl.pathname}${request.nextUrl.search}`, `https://${publicHost}`);
     return NextResponse.redirect(secureUrl, 308);
   }
   const secret = process.env.PORTAL_SESSION_SECRET ?? "";

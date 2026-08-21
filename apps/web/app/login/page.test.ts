@@ -16,4 +16,10 @@ describe("mobile login safeguards", () => {
     expect(source).toContain('window.location.protocol === "http:"');
     expect(source).toContain("https://${window.location.host}");
   });
+
+  it("does not expose the container hostname in redirects", () => {
+    const middleware = readFileSync(join(process.cwd(), "middleware.ts"), "utf8");
+    expect(middleware).toContain('request.headers.get("x-forwarded-host")');
+    expect(middleware).toContain('`https://${publicHost}`');
+  });
 });
