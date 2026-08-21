@@ -57,7 +57,7 @@ export default function Home() {
     if (storedRoles) setRoles(storedRoles);
     if (storedLocation) setLocation(storedLocation);
     if (storedLogs) setLogs(JSON.parse(storedLogs) as LogEntry[]);
-    void fetch(`${AGENT_URL}/profile`).then(async (response) => {
+    void fetch("/api/portal/profile").then(async (response) => {
       if (response.ok) {
         const nextProfile = await response.json() as Profile;
         setProfile(nextProfile);
@@ -155,7 +155,7 @@ export default function Home() {
   async function saveProfile(event: FormEvent) {
     event.preventDefault();
     const nextProfile = { ...profile, target_roles: roleList, skills: skillsText.split(",").map((item) => item.trim()).filter(Boolean) };
-    const response = await fetch(`${AGENT_URL}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(nextProfile) });
+    const response = await fetch("/api/portal/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(nextProfile) });
     if (!response.ok) { setProfileMessage("Falha ao salvar o perfil."); return; }
     setProfile(await response.json() as Profile);
     setProfileMessage("Perfil salvo.");
@@ -168,7 +168,7 @@ export default function Home() {
     const body = new FormData();
     body.append("file", file);
     setProfileMessage("Enviando currículo...");
-    const response = await fetch(`${AGENT_URL}/profile/resume`, { method: "POST", body });
+    const response = await fetch("/api/portal/profile/resume", { method: "POST", body });
     if (!response.ok) { setProfileMessage("Falha ao importar currículo. Use PDF ou DOCX de até 10 MB."); return; }
     const data = await response.json() as { resume_path: string };
     setProfile((current) => ({ ...current, resume_path: data.resume_path }));
@@ -254,7 +254,7 @@ export default function Home() {
         <div className="metrics">{[["Encontradas", String(dashboard?.workspace.jobs ?? jobs.length), "Hoje e histórico"], ["Qualificadas", String(jobs.filter((job) => (job.score ?? 0) >= 75).length), "Fit mínimo 75"], ["Aplicadas", String(dashboard?.workspace.applications ?? appliedCount), "Confirmadas"], ["Ação necessária", String(dashboard?.workspace.pending_decisions ?? pendingCount), "Revisão humana"]].map(([label, value, hint]) => <article key={label}><small>{label}</small><b>{value}</b><span>{hint}</span></article>)}</div>
         <div className="grid two dashboard-grid">
           <article className="panel"><div className="section-header"><div><span className="eyebrow">PIPELINE</span><h3>Conversão de carreira</h3></div><button className="link-button" onClick={() => setView("applications")}>Ver pipeline</button></div><div className="pipeline">{[["Aplicadas", dashboard?.workspace.applications ?? appliedCount], ["Respostas", 0], ["Entrevistas", 0], ["Técnicas", 0], ["Propostas", 0]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong><i style={{width: `${Math.max(4, Number(value) * 8)}%`}} /></div>)}</div></article>
-          <article className="panel system-card"><div className="section-header"><div><span className="eyebrow">SAÚDE</span><h3>Estado dos motores</h3></div><span className="live-pill">VPS ativa</span></div><ul className="engine-list"><li><span className="status-dot online" />API, banco e fila</li><li><span className={`status-dot ${agent.status === "offline" ? "warning" : "online"}`} />Executor local: {agent.status === "offline" ? "desconectado" : agent.status}</li><li><span className={`status-dot ${googleStatus.connected ? "online" : "warning"}`} />Gmail e Agenda: {googleStatus.connected ? "conectados" : "configurar"}</li><li><span className="status-dot safe" />Autoenvio: bloqueado por segurança</li></ul><small className="muted">{dashboardMessage}</small></article>
+          <article className="panel system-card"><div className="section-header"><div><span className="eyebrow">SAÚDE</span><h3>Estado dos motores</h3></div><span className="live-pill">VPS ativa</span></div><ul className="engine-list"><li><span className="status-dot online" />Orquestrador, API, banco e fila: online</li><li><span className={`status-dot ${agent.status === "offline" ? "warning" : "online"}`} />Executor do navegador: {agent.status === "offline" ? "aguardando conector do computador" : agent.status}</li><li><span className={`status-dot ${googleStatus.connected ? "online" : "warning"}`} />Gmail e Agenda: {googleStatus.connected ? "conectados" : "OAuth pendente na VPS"}</li><li><span className="status-dot safe" />Autoenvio: bloqueado por segurança</li></ul><small className="muted">{dashboardMessage}</small></article>
         </div>
         <article className="panel roadmap-strip"><div><span className="eyebrow">ESTRATÉGIA</span><h3>Como o CareerOS decide</h3></div>{["Descobrir", "Validar", "Pontuar", "Decidir", "Personalizar", "Acompanhar"].map((step, index) => <div className="roadmap-step" key={step}><b>{index + 1}</b><span>{step}</span></div>)}</article>
       </>}
