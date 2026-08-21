@@ -64,3 +64,14 @@ O Core também expõe ingestão/listagem de vagas, cálculo de score e transiç�
 ## Preservação
 
 As próximas fases devem usar migrations aditivas, manter volumes e `.env`, nunca executar `down -v` e validar restauração antes de mudanças destrutivas.
+
+## Fase 3
+
+- Resume Router por família profissional e idioma, usando apenas arquivos ativos e aprovados;
+- Answer Memory persistida, verificada e acessível no portal;
+- preparação idempotente por organização e vaga;
+- estratégia segura entre e-mail publicado, ATS estruturado e revisão manual;
+- aprovação humana obrigatória antes da criação do rascunho;
+- integração privada cria rascunho Gmail com anexo, mas não envia;
+- eventos imutáveis preservam preparação e aprovação;
+- migration `0007_application_preparation` é aditiva e mantém todos os dados existentes.

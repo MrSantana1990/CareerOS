@@ -17,7 +17,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
-from .google_career import connection_status, create_calendar_event, create_reply_draft, mark_questionnaire_complete, scan_recruitment_mail
+from .google_career import (connection_status, create_application_email_draft,
+                            create_calendar_event, create_reply_draft,
+                            mark_questionnaire_complete, scan_recruitment_mail)
 
 runtime_override = os.getenv("CAREER_RUNTIME")
 ROOT = Path(__file__).resolve().parents[3] if not runtime_override else Path("/app")
@@ -36,6 +38,7 @@ GOOGLE_TOKEN = RUNTIME / "google" / "google-token.json"
 GOOGLE_INBOX = RUNTIME / "google" / "career-mail.json"
 GOOGLE_STATUS_CACHE = RUNTIME / "google" / "connection-status.json"
 LOCAL_AI_URL = os.getenv("LOCAL_AI_URL", "http://127.0.0.1:8080/v1")
+RESUME_STORAGE = Path(os.getenv("RESUME_STORAGE_DIR", "/data/resumes")).resolve()
 
 PLATFORMS = {
     "InfoJobs": "https://www.infojobs.com.br/",
@@ -124,6 +127,13 @@ class AIAdviceRequest(BaseModel):
 
 class GoogleDraftRequest(BaseModel):
     message_id: str = Field(min_length=5, max_length=200)
+
+
+class ApplicationEmailDraftRequest(BaseModel):
+    recipient: str = Field(min_length=5, max_length=254)
+    subject: str = Field(min_length=3, max_length=300)
+    body: str = Field(min_length=10, max_length=10000)
+    resume_path: str = Field(min_length=5, max_length=500)
 
 
 SKILL_CATALOG = [
@@ -1023,6 +1033,20 @@ async def google_draft(request: GoogleDraftRequest) -> dict:
         return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao criar rascunho: {type(exc).__name__}") from exc
+
+
+@app.post("/google/application-draft")
+async def google_application_draft(request: ApplicationEmailDraftRequest) -> dict:
+    source = Path(request.resume_path).resolve()
+    if not source.is_relative_to(RESUME_STORAGE) or not source.is_file():
+        raise HTTPException(status_code=400, detail="Currículo aprovado não localizado.")
+    try:
+        result = await asyncio.to_thread(create_application_email_draft, GOOGLE_TOKEN,
+                                         request.recipient, request.subject, request.body, source)
+        event("APPLICATION_EMAIL_DRAFT_CREATED", draft_id=result["draft_id"])
+        return result
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Falha ao criar rascunho: {type(exc).__name__}") from exc
 
