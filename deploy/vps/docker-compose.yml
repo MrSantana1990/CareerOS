@@ -46,6 +46,9 @@ services:
       CORS_ORIGINS: "https://carreira.helpsystempro.site"
       AUTO_APPLY_ENABLED: "false"
       AUTO_APPLY_SAFETY_ACKNOWLEDGED: "false"
+      RESUME_STORAGE_DIR: "/data/resumes"
+    volumes:
+      - resume_data:/data/resumes
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -107,3 +110,4 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  resume_data:

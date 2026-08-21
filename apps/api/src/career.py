@@ -1,7 +1,11 @@
 from typing import Any, Literal
 from uuid import UUID
+from pathlib import Path
+import hashlib
+import json
+import os
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -24,6 +28,20 @@ class DecisionInput(BaseModel):
     decision: Literal["APPROVED", "DISCARDED"]
 
 
+class ProfileInput(BaseModel):
+    full_name: str = Field(min_length=2, max_length=160)
+    email: str = Field(min_length=5, max_length=254)
+    phone: str = Field(default="", max_length=40)
+    city: str = Field(default="", max_length=100)
+    state: str = Field(default="", max_length=80)
+    linkedin_url: str = Field(default="", max_length=500)
+    salary_expectation: str = Field(default="", max_length=120)
+    work_models: list[str] = []
+    target_roles: list[str] = []
+    skills: list[str] = []
+    approved_answers: dict[str, str] = {}
+
+
 async def organization_id(slug: str) -> UUID:
     async with SessionLocal() as session:
         value = await session.scalar(
@@ -33,6 +51,104 @@ async def organization_id(slug: str) -> UUID:
     if not value:
         raise HTTPException(status_code=404, detail="Organização não encontrada.")
     return value
+
+
+@router.get("/profile")
+async def get_profile(slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    query = text("""
+        SELECT u.full_name, u.email, COALESCE(u.phone, '') AS phone,
+               COALESCE(p.city, '') AS city, COALESCE(p.state, '') AS state,
+               COALESCE(p.linkedin_url, '') AS linkedin_url,
+               COALESCE(p.salary_expectation, '') AS salary_expectation,
+               COALESCE(p.work_models, '[]'::jsonb) AS work_models,
+               COALESCE(p.target_roles, '[]'::jsonb) AS target_roles,
+               COALESCE(p.approved_answers, '{}'::jsonb) AS approved_answers,
+               COALESCE((SELECT jsonb_agg(s.name ORDER BY s.name) FROM skills s
+                         WHERE s.organization_id = :organization_id AND s.deleted_at IS NULL), '[]'::jsonb) AS skills,
+               rv.storage_key AS resume_path, r.name AS resume_name
+        FROM users u
+        LEFT JOIN candidate_profiles p ON p.user_id = u.id AND p.deleted_at IS NULL
+        LEFT JOIN LATERAL (
+            SELECT rv.storage_key, rv.resume_id FROM resume_versions rv
+            WHERE rv.organization_id = :organization_id ORDER BY rv.created_at DESC LIMIT 1
+        ) rv ON true
+        LEFT JOIN resumes r ON r.id = rv.resume_id
+        WHERE u.organization_id = :organization_id AND u.role = 'OWNER' AND u.deleted_at IS NULL
+        ORDER BY u.created_at LIMIT 1
+    """)
+    async with SessionLocal() as session:
+        row = (await session.execute(query, {"organization_id": org_id})).mappings().first()
+    if not row:
+        return {"full_name": "", "email": "", "phone": "", "city": "", "state": "", "linkedin_url": "", "salary_expectation": "", "work_models": [], "target_roles": [], "skills": [], "approved_answers": {}, "resume_path": "", "resume_name": ""}
+    return dict(row)
+
+
+@router.put("/profile")
+async def save_profile(payload: ProfileInput, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        user_id = await session.scalar(text("""
+            INSERT INTO users (id, organization_id, email, full_name, phone, role, status)
+            VALUES (gen_random_uuid(), :organization_id, :email, :full_name, :phone, 'OWNER', 'ACTIVE')
+            ON CONFLICT (organization_id, email) DO UPDATE
+            SET full_name = EXCLUDED.full_name, phone = EXCLUDED.phone, updated_at = now()
+            RETURNING id
+        """), {"organization_id": org_id, "email": payload.email, "full_name": payload.full_name, "phone": payload.phone})
+        await session.execute(text("""
+            INSERT INTO candidate_profiles
+                (id, organization_id, user_id, city, state, linkedin_url, salary_expectation,
+                 work_models, target_roles, approved_answers)
+            VALUES (gen_random_uuid(), :organization_id, :user_id, :city, :state, :linkedin_url,
+                    :salary_expectation, CAST(:work_models AS jsonb), CAST(:target_roles AS jsonb),
+                    CAST(:approved_answers AS jsonb))
+            ON CONFLICT (organization_id, user_id) DO UPDATE SET
+                city = EXCLUDED.city, state = EXCLUDED.state, linkedin_url = EXCLUDED.linkedin_url,
+                salary_expectation = EXCLUDED.salary_expectation, work_models = EXCLUDED.work_models,
+                target_roles = EXCLUDED.target_roles, approved_answers = EXCLUDED.approved_answers,
+                updated_at = now(), deleted_at = NULL
+        """), {"organization_id": org_id, "user_id": user_id, "city": payload.city, "state": payload.state,
+               "linkedin_url": payload.linkedin_url, "salary_expectation": payload.salary_expectation,
+               "work_models": json.dumps(payload.work_models), "target_roles": json.dumps(payload.target_roles),
+               "approved_answers": json.dumps(payload.approved_answers)})
+        for skill in {item.strip() for item in payload.skills if item.strip()}:
+            await session.execute(text("""
+                INSERT INTO skills (id, organization_id, name, level, verified)
+                VALUES (gen_random_uuid(), :organization_id, :name, 'INFORMED', false)
+                ON CONFLICT (organization_id, name) DO UPDATE SET deleted_at = NULL, updated_at = now()
+            """), {"organization_id": org_id, "name": skill})
+        await session.commit()
+    return await get_profile(slug)
+
+
+@router.post("/profile/resume")
+async def upload_resume(file: UploadFile = File(...), slug: str = Depends(require_admin)) -> dict[str, str]:
+    org_id = await organization_id(slug)
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".pdf", ".docx"}:
+        raise HTTPException(status_code=400, detail="Use um arquivo PDF ou DOCX.")
+    content = await file.read(10 * 1024 * 1024 + 1)
+    if not content or len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="O currículo deve ter até 10 MB.")
+    digest = hashlib.sha256(content).hexdigest()
+    storage_dir = Path(os.getenv("RESUME_STORAGE_DIR", "/tmp/careeros-resumes"))
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    target = storage_dir / f"{org_id}-{digest[:16]}{suffix}"
+    target.write_bytes(content)
+    async with SessionLocal() as session:
+        resume_id = await session.scalar(text("""
+            INSERT INTO resumes (id, organization_id, code, name, family, language, active)
+            VALUES (gen_random_uuid(), :organization_id, 'CURRENT', :name, 'GENERAL', 'pt-BR', true)
+            ON CONFLICT (organization_id, code) DO UPDATE SET name = EXCLUDED.name, updated_at = now()
+            RETURNING id
+        """), {"organization_id": org_id, "name": file.filename or f"curriculo{suffix}"})
+        version = (await session.scalar(text("SELECT COALESCE(max(version), 0) + 1 FROM resume_versions WHERE resume_id = :resume_id"), {"resume_id": resume_id})) or 1
+        await session.execute(text("""
+            INSERT INTO resume_versions (id, organization_id, resume_id, version, storage_key, sha256, approved_at)
+            VALUES (gen_random_uuid(), :organization_id, :resume_id, :version, :storage_key, :sha256, now())
+        """), {"organization_id": org_id, "resume_id": resume_id, "version": version, "storage_key": str(target), "sha256": digest})
+        await session.commit()
+    return {"resume_path": str(target), "resume_name": file.filename or target.name}
 
 
 @router.get("/career-rules")
