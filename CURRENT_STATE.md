@@ -102,3 +102,12 @@ As próximas fases devem usar migrations aditivas, manter volumes e `.env`, nunc
 - taxas nulas quando não existe denominador confiável;
 - recomendações bloqueadas até existir amostra mínima de 10 candidaturas e ao menos um envio confirmado;
 - tela mobile **Resultados** informa claramente quando não há dados suficientes.
+
+## Login móvel e recuperação
+
+- cookie de sessão `Secure`, `HttpOnly` e `SameSite=Lax`, compatível com Safari/PWA;
+- a tela confirma que o cookie foi persistido antes de abrir o portal;
+- campos desativam capitalização e correção automática no celular;
+- senha pode ser exibida temporariamente para conferência;
+- recuperação acontece na mesma página com código temporário enviado ao e-mail administrativo;
+- entrega Gmail usa endpoint privado autenticado e nunca envia a senha.

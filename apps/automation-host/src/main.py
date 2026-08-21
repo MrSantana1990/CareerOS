@@ -12,14 +12,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote_plus, urljoin, urlparse
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 from .google_career import (connection_status, create_application_email_draft,
                             create_calendar_event, create_reply_draft,
-                            mark_questionnaire_complete, scan_recruitment_mail)
+                            mark_questionnaire_complete, scan_recruitment_mail,
+                            send_security_code)
 
 runtime_override = os.getenv("CAREER_RUNTIME")
 ROOT = Path(__file__).resolve().parents[3] if not runtime_override else Path("/app")
@@ -176,6 +177,11 @@ class AIAdviceRequest(BaseModel):
 
 class GoogleDraftRequest(BaseModel):
     message_id: str = Field(min_length=5, max_length=200)
+
+
+class SecurityCodeRequest(BaseModel):
+    recipient: str = Field(min_length=5, max_length=254)
+    code: str = Field(min_length=6, max_length=12, pattern=r"^[A-Z0-9]+$")
 
 
 class ApplicationEmailDraftRequest(BaseModel):
@@ -1132,6 +1138,18 @@ async def google_scan() -> dict:
         raise HTTPException(status_code=502, detail=f"Falha ao consultar Gmail: {type(exc).__name__}") from exc
 
 
+@app.post("/google/security-code")
+async def google_security_code(request: SecurityCodeRequest,
+                               authorization: str = Header(default="")) -> dict[str, bool]:
+    if not CAREER_ADMIN_TOKEN or authorization != f"Bearer {CAREER_ADMIN_TOKEN}":
+        raise HTTPException(status_code=401, detail="Não autorizado.")
+    try:
+        await asyncio.to_thread(send_security_code, GOOGLE_TOKEN, request.recipient, request.code)
+        event("SECURITY_CODE_SENT")
+        return {"sent": True}
+    except Exception as exc:
+        event("SECURITY_CODE_FAILED", error=type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Não foi possível entregar o código.") from exc
 @app.post("/google/draft")
 async def google_draft(request: GoogleDraftRequest) -> dict:
     try:
