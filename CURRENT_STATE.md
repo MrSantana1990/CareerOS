@@ -75,3 +75,13 @@ As próximas fases devem usar migrations aditivas, manter volumes e `.env`, nunc
 - integração privada cria rascunho Gmail com anexo, mas não envia;
 - eventos imutáveis preservam preparação e aprovação;
 - migration `0007_application_preparation` é aditiva e mantém todos os dados existentes.
+
+## Fase 4
+
+- comunicações de recrutamento persistidas e deduplicadas no PostgreSQL;
+- correlação explicável por domínio, empresa e título da vaga;
+- ambiguidades permanecem em revisão, sem associação forçada;
+- entrevistas e propostas recebem prioridade urgente;
+- central de notificações disponível no portal e no celular;
+- follow-up apenas gera lembrete após sete dias sem resposta;
+- nenhum e-mail ou candidatura é enviado automaticamente.

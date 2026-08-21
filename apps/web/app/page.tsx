@@ -12,6 +12,7 @@ type View =
   | "rules"
   | "platforms"
   | "inbox"
+  | "notifications"
   | "automation"
   | "settings"
   | "logs"
@@ -135,6 +136,7 @@ type PortalDashboard = {
   decisions: Decision[];
   generatedAt: string;
 };
+type CareerNotification = { id: string; kind: string; title: string; body: string; priority: string; read_at?: string | null; created_at: string };
 const AGENT_URL = "/agent";
 
 const nav: Array<[View, string]> = [
@@ -147,6 +149,7 @@ const nav: Array<[View, string]> = [
   ["rules", "Regras de carreira"],
   ["platforms", "Fontes"],
   ["inbox", "Gmail e Agenda"],
+  ["notifications", "Notificações"],
   ["automation", "Automação"],
   ["settings", "Preferências"],
   ["logs", "Auditoria"],
@@ -235,6 +238,7 @@ export default function Home() {
     last_items: [],
   });
   const [dashboard, setDashboard] = useState<PortalDashboard | null>(null);
+  const [notifications, setNotifications] = useState<CareerNotification[]>([]);
   const [dashboardMessage, setDashboardMessage] = useState(
     "Sincronizando dados da VPS…",
   );
@@ -283,6 +287,12 @@ export default function Home() {
         return;
       }
       setDashboard((await response.json()) as PortalDashboard);
+      const notificationResponse = await fetch(
+        "/api/portal/notifications?unread_only=false",
+        { cache: "no-store" },
+      ).catch(() => null);
+      if (notificationResponse?.ok)
+        setNotifications((await notificationResponse.json()) as CareerNotification[]);
       setDashboardMessage("Dados persistidos e atualizados pela VPS.");
     }
     void refreshDashboard();
@@ -637,6 +647,24 @@ export default function Home() {
     );
   }
 
+  async function markNotificationRead(id: string) {
+    const response = await fetch(`/api/portal/notifications/${id}/read`, { method: "POST" });
+    if (!response.ok) return;
+    setNotifications((current) => current.map((item) =>
+      item.id === id ? { ...item, read_at: new Date().toISOString() } : item,
+    ));
+  }
+
+  async function evaluateFollowups() {
+    const response = await fetch("/api/portal/followups/evaluate", { method: "POST" });
+    if (!response.ok) {
+      record("Não foi possível avaliar follow-ups.");
+      return;
+    }
+    const result = (await response.json()) as { notifications: number };
+    record(`${result.notifications} lembrete(s) de follow-up criado(s), sem envio automático.`);
+  }
+
   return (
     <main className="shell">
       <aside className="sidebar">
@@ -671,9 +699,10 @@ export default function Home() {
               qualificadas.
             </p>
           </div>
-          <button className="danger" onClick={stopWork} disabled={!running}>
-            PARAR AUTOMAÇÃO
-          </button>
+          <div className="topbar-actions">
+            <button className="notification-button" onClick={() => setView("notifications")}>Alertas <span>{notifications.filter((item) => !item.read_at).length}</span></button>
+            <button className="danger" onClick={stopWork} disabled={!running}>PARAR AUTOMAÇÃO</button>
+          </div>
         </header>
 
         {view === "overview" && (
@@ -1318,6 +1347,10 @@ export default function Home() {
             )}
           </article>
         )}
+        {view === "notifications" && <article className="panel">
+          <div className="section-header"><div><h3>Central de notificações</h3><p>Entrevistas e propostas aparecem primeiro. Nenhum follow-up é enviado sem sua revisão.</p></div><button className="primary" onClick={() => void evaluateFollowups()}>Avaliar follow-ups</button></div>
+          {notifications.length === 0 ? <p className="muted">Nenhuma notificação pendente.</p> : <div className="notification-list">{notifications.map((item) => <button key={item.id} className={`${item.priority.toLowerCase()} ${item.read_at ? "read" : ""}`} onClick={() => void markNotificationRead(item.id)}><span className="badge">{item.priority}</span><strong>{item.title}</strong><p>{item.body}</p><small>{new Date(item.created_at).toLocaleString("pt-BR")}{item.read_at ? " · lida" : " · toque para marcar como lida"}</small></button>)}</div>}
+        </article>}
         {view === "inbox" && (
           <article className="panel">
             <div className="section-header">
