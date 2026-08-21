@@ -49,8 +49,11 @@ jobs:
           cache: pip
           cache-dependency-path: apps/api/pyproject.toml
       - run: pip install -e "apps/api[dev]"
+      - run: pip install -e "apps/worker[dev]"
       - run: ruff check apps/api apps/worker
       - run: pytest apps/api/tests -q
+      - run: pytest tests -q
+        working-directory: apps/worker
       - run: python -m compileall -q apps/api/src apps/api/migrations
       - name: Executar migrações em PostgreSQL real
         working-directory: apps/api
