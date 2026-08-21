@@ -77,6 +77,24 @@ class TransitionInput(BaseModel):
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 
+class SourceConnectionInput(BaseModel):
+    adapter: Literal["GREENHOUSE", "LEVER", "ASHBY"]
+    account_key: str = Field(min_length=2, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")
+    company_name: str = Field(min_length=2, max_length=200)
+    enabled: bool = False
+    maximum_jobs: int = Field(default=200, ge=1, le=500)
+    cadence_minutes: int = Field(default=360, ge=30, le=1440)
+
+
+class DiscoveryRunInput(BaseModel):
+    run_id: UUID | None = None
+    status: Literal["RUNNING", "COMPLETED", "FAILED"]
+    found_count: int = Field(default=0, ge=0)
+    created_count: int = Field(default=0, ge=0)
+    deduplicated_count: int = Field(default=0, ge=0)
+    error_message: str | None = Field(default=None, max_length=2000)
+
+
 async def organization_id(slug: str) -> UUID:
     async with SessionLocal() as session:
         value = await session.scalar(
@@ -86,6 +104,84 @@ async def organization_id(slug: str) -> UUID:
     if not value:
         raise HTTPException(status_code=404, detail="Organização não encontrada.")
     return value
+
+
+@router.get("/sources")
+async def list_sources(enabled: bool | None = None, slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    org_id = await organization_id(slug)
+    condition = "AND enabled=:enabled" if enabled is not None else ""
+    query = text(f"""
+        SELECT id, adapter, account_key, company_name, enabled, maximum_jobs, cadence_minutes,
+               last_started_at, last_completed_at, last_error
+        FROM source_connections
+        WHERE organization_id=:organization_id {condition}
+        ORDER BY company_name, adapter
+    """)
+    parameters = {"organization_id": org_id, "enabled": enabled}
+    async with SessionLocal() as session:
+        rows = (await session.execute(query, parameters)).mappings()
+    return [dict(row) for row in rows]
+
+
+@router.post("/sources")
+async def save_source(payload: SourceConnectionInput, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    values = {**payload.model_dump(), "organization_id": org_id}
+    query = text("""
+        INSERT INTO source_connections
+          (id, organization_id, adapter, account_key, company_name, enabled, maximum_jobs, cadence_minutes)
+        VALUES (gen_random_uuid(), :organization_id, :adapter, :account_key, :company_name,
+                :enabled, :maximum_jobs, :cadence_minutes)
+        ON CONFLICT (organization_id, adapter, account_key) DO UPDATE SET
+          company_name=EXCLUDED.company_name, enabled=EXCLUDED.enabled,
+          maximum_jobs=EXCLUDED.maximum_jobs, cadence_minutes=EXCLUDED.cadence_minutes,
+          updated_at=now()
+        RETURNING id, adapter, account_key, company_name, enabled, maximum_jobs, cadence_minutes
+    """)
+    async with SessionLocal() as session:
+        row = (await session.execute(query, values)).mappings().one()
+        await session.commit()
+    return dict(row)
+
+
+@router.post("/sources/{connection_id}/runs")
+async def report_discovery_run(connection_id: UUID, payload: DiscoveryRunInput,
+                               slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        exists = await session.scalar(text("""
+            SELECT id FROM source_connections
+            WHERE id=:id AND organization_id=:organization_id
+        """), {"id": connection_id, "organization_id": org_id})
+        if not exists:
+            raise HTTPException(status_code=404, detail="Fonte não encontrada.")
+        if payload.status == "RUNNING":
+            run_id = await session.scalar(text("""
+                INSERT INTO discovery_runs (id, organization_id, source_connection_id, status)
+                VALUES (gen_random_uuid(), :organization_id, :connection_id, 'RUNNING') RETURNING id
+            """), {"organization_id": org_id, "connection_id": connection_id})
+            await session.execute(text("""
+                UPDATE source_connections SET last_started_at=now(), last_error=NULL, updated_at=now()
+                WHERE id=:connection_id
+            """), {"connection_id": connection_id})
+        else:
+            if not payload.run_id:
+                raise HTTPException(status_code=422, detail="run_id é obrigatório para finalizar.")
+            run_id = payload.run_id
+            updated = await session.execute(text("""
+                UPDATE discovery_runs SET status=:status, found_count=:found_count,
+                  created_count=:created_count, deduplicated_count=:deduplicated_count,
+                  error_message=:error_message, completed_at=now()
+                WHERE id=:run_id AND source_connection_id=:connection_id
+            """), {**payload.model_dump(), "connection_id": connection_id})
+            if updated.rowcount != 1:
+                raise HTTPException(status_code=404, detail="Execução não encontrada.")
+            await session.execute(text("""
+                UPDATE source_connections SET last_completed_at=now(), last_error=:error_message,
+                  updated_at=now() WHERE id=:connection_id
+            """), {"connection_id": connection_id, "error_message": payload.error_message})
+        await session.commit()
+    return {"run_id": run_id, "status": payload.status}
 
 
 @router.post("/jobs")

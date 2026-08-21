@@ -40,7 +40,7 @@ O produto existente foi preservado. A fundação agora contém vagas normalizada
 - Banco: 1 organização, 1 usuário, 1 perfil, 7 regras, 15 competências, 1 versão de currículo, 0 vagas e 0 candidaturas.
 - Backup: `/opt/backups/helpsystempro-carreira/phase0-b15503a.dump`, modo `600`.
 
-## Entregas da Fase 1
+## Entregas das Fases 1 e 2
 
 - ingestão de vaga com fingerprint determinístico e múltiplas fontes;
 - Score V2 com nove dimensões, pontos fortes, lacunas, riscos e bloqueios;
@@ -50,6 +50,10 @@ O produto existente foi preservado. A fundação agora contém vagas normalizada
 - score reprocessável por worker sem duplicação;
 - compatibilidade do estado legado `DRAFT` com `DISCOVERED`;
 - flags granulares de automação, todas desligadas por padrão.
+- adapters de leitura pública para Greenhouse, Lever e Ashby;
+- cadastro persistente de fontes e histórico de varreduras;
+- scheduler VPS-first com cadência mínima e limites por fonte;
+- nenhuma fonte cadastrada ou automação habilitada automaticamente.
 
 ## Rotas e flags
 

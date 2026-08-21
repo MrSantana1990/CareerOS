@@ -4,3 +4,12 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["dramatiq[redis]==1.17.1", "pydantic-settings==2.7.1", "python-json-logger==3.2.1"]
 
+[project.optional-dependencies]
+dev = ["pytest==8.3.4", "ruff==0.9.6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100

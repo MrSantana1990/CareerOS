@@ -34,6 +34,9 @@ Swagger: `http://localhost:8765/docs`.
 - `GET /api/v1/jobs` — lista vagas e último score
 - `POST /api/v1/jobs/{job_id}/score` — calcula e persiste o Score V2
 - `POST /api/v1/applications/{application_id}/transition` — aplica transição válida e registra evento imutável
+- `GET /api/v1/sources` — lista configurações de fontes estruturadas
+- `POST /api/v1/sources` — cria ou atualiza uma fonte, desligada por padrão
+- `POST /api/v1/sources/{connection_id}/runs` — registra execução e resultado do worker
 - `GET /metrics`
 - Swagger em `/docs`
 
