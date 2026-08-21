@@ -90,7 +90,7 @@ services:
       start_period: 20s
     restart: unless-stopped
     security_opt: ["no-new-privileges:true"]
-    networks: [private]
+    networks: [private, edge]
 
   web:
     build:
