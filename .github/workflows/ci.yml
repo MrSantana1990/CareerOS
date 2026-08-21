@@ -52,6 +52,7 @@ jobs:
       - run: pip install -e "apps/worker[dev]"
       - run: ruff check apps/api apps/worker apps/automation-host
       - run: pytest apps/api/tests -q
+      - run: pytest apps/automation-host/tests -q
       - run: pytest tests -q
         working-directory: apps/worker
       - run: python -m compileall -q apps/api/src apps/api/migrations

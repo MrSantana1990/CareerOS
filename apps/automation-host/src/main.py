@@ -1038,7 +1038,7 @@ async def google_scan() -> dict:
                              "Content-Type": "application/json"},
                     method="POST",
                 )
-                await asyncio.to_thread(urlopen, request, 20)
+                await asyncio.to_thread(urlopen, request, timeout=20)
             except Exception as sync_error:
                 event("GOOGLE_CORE_SYNC_FAILED", error=type(sync_error).__name__)
         event("GOOGLE_MAIL_SCANNED", scanned=result["scanned"], discovered=result["discovered"])
