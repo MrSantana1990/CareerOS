@@ -41,6 +41,53 @@ LOCAL_AI_URL = os.getenv("LOCAL_AI_URL", "http://127.0.0.1:8080/v1")
 RESUME_STORAGE = Path(os.getenv("RESUME_STORAGE_DIR", "/data/resumes")).resolve()
 CAREER_API_URL = os.getenv("CAREER_API_URL", "http://api:8000").rstrip("/")
 CAREER_ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
+EXECUTOR_ID = os.getenv("EXECUTOR_ID", "local-browser")
+
+INTERVENTION_PATTERNS = {
+    "CAPTCHA": re.compile(r"captcha|recaptcha|não sou um robô", re.IGNORECASE),
+    "MFA": re.compile(r"verification code|two-factor|multi-factor|código de verificação|autenticação em duas etapas", re.IGNORECASE),
+    "LOGIN": re.compile(r"sign in|log in|entrar na conta|faça login", re.IGNORECASE),
+}
+
+
+async def report_intervention(application: dict[str, object], reason: str, title: str,
+                              instructions: str, page_url: str | None = None,
+                              evidence: dict[str, object] | None = None) -> None:
+    if not CAREER_ADMIN_TOKEN:
+        event("INTERVENTION_REPORT_SKIPPED", reason="missing_admin_token")
+        return
+    legacy_id = str(application.get("id", ""))
+    payload = {
+        "application_id": None,
+        "executor_id": EXECUTOR_ID,
+        "reason": reason,
+        "title": title,
+        "instructions": instructions,
+        "page_url": page_url,
+        "evidence": {
+            "legacy_application_id": legacy_id,
+            "job_title": str(application.get("title", ""))[:240],
+            "deduplication_key": f"{legacy_id}:{reason}",
+            **(evidence or {}),
+        },
+    }
+
+    def send() -> None:
+        request = Request(
+            CAREER_API_URL + "/api/v1/interventions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=20):
+            pass
+
+    try:
+        await asyncio.to_thread(send)
+        event("INTERVENTION_REPORTED", application_id=legacy_id, reason=reason)
+    except (URLError, TimeoutError, OSError) as exc:
+        event("INTERVENTION_REPORT_FAILED", application_id=legacy_id, reason=reason,
+              error=type(exc).__name__)
 
 PLATFORMS = {
     "InfoJobs": "https://www.infojobs.com.br/",
@@ -527,9 +574,22 @@ async def inspect_application_queue(request: PrepareRequest) -> None:
             elif "gupy.io" in current_url or "gupy.io" in body.lower():
                 application["status"] = "BLOCKED"
                 application["reason"] = "Ignorada: plataforma bloqueada pelo usuário."
-            elif re.search(r"captcha|recaptcha|não sou um robô", body, re.IGNORECASE):
+            elif INTERVENTION_PATTERNS["MFA"].search(body):
+                application["status"] = "MANUAL_REQUIRED"
+                application["reason"] = "Confirmação em duas etapas necessária."
+                await report_intervention(
+                    application, "MFA", "Confirme o acesso na plataforma",
+                    "Abra a página, conclua a verificação em duas etapas e depois retome a automação.",
+                    page.url,
+                )
+            elif INTERVENTION_PATTERNS["CAPTCHA"].search(body):
                 application["status"] = "MANUAL_REQUIRED"
                 application["reason"] = "CAPTCHA detectado."
+                await report_intervention(
+                    application, "CAPTCHA", "Verificação humana necessária",
+                    "Abra a página e resolva o CAPTCHA manualmente. O sistema nunca tenta contorná-lo.",
+                    page.url,
+                )
             else:
                 apply_locator = page.get_by_role(
                     "button",
@@ -822,9 +882,23 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 submitted += 1
                 event("APPLICATION_ALREADY_SUBMITTED", application_id=application["id"])
                 continue
-            if re.search(r"captcha|recaptcha|não sou um robô", body, re.IGNORECASE):
+            if INTERVENTION_PATTERNS["MFA"].search(body):
+                application["status"] = "MANUAL_REQUIRED"
+                application["reason"] = "Confirmação em duas etapas necessária."
+                await report_intervention(
+                    application, "MFA", "Confirme o acesso na plataforma",
+                    "Abra a página, conclua a verificação em duas etapas e depois retome a automação.",
+                    page.url,
+                )
+                continue
+            if INTERVENTION_PATTERNS["CAPTCHA"].search(body):
                 application["status"] = "MANUAL_REQUIRED"
                 application["reason"] = "CAPTCHA detectado."
+                await report_intervention(
+                    application, "CAPTCHA", "Verificação humana necessária",
+                    "Abra a página e resolva o CAPTCHA manualmente. O sistema nunca tenta contorná-lo.",
+                    page.url,
+                )
                 continue
             dismissed = await dismiss_overlays(page)
             action_clicked = await click_first_visible(
@@ -848,6 +922,11 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 application["status"] = "MANUAL_REQUIRED"
                 application["reason"] = f"Resposta ainda não comprovada: {', '.join(unknown[:5])}."
                 remember_layout(application, "required_fields", {"fields": unknown})
+                await report_intervention(
+                    application, "UNKNOWN_FIELD", "Revise respostas obrigatórias",
+                    "Existem campos que o sistema não pode responder sem sua confirmação.",
+                    page.url, {"fields": unknown[:20]},
+                )
                 continue
             submit = page.get_by_role("button", name=re.compile(
                 r"enviar candidatura|enviar meu curr[ií]culo|submit application|finalizar candidatura|confirmar candidatura|concluir candidatura",
@@ -878,6 +957,11 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                     application["status"] = "MANUAL_REQUIRED"
                     application["reason"] = "Envio acionado, mas sem confirmação da plataforma; não contabilizada."
                     remember_layout(application, "submission_unconfirmed")
+                    await report_intervention(
+                        application, "SUBMISSION_UNCONFIRMED", "Confirme o envio da candidatura",
+                        "A plataforma não confirmou o envio. Verifique a página antes de tentar novamente.",
+                        page.url,
+                    )
             else:
                 application["status"] = "READY_FOR_REVIEW"
                 application["reason"] = (

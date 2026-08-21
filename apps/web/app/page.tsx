@@ -13,6 +13,7 @@ type View =
   | "platforms"
   | "inbox"
   | "notifications"
+  | "interventions"
   | "automation"
   | "settings"
   | "logs"
@@ -137,6 +138,7 @@ type PortalDashboard = {
   generatedAt: string;
 };
 type CareerNotification = { id: string; kind: string; title: string; body: string; priority: string; read_at?: string | null; created_at: string };
+type HumanIntervention = { id: string; reason: string; status: string; title: string; instructions: string; page_url?: string | null; evidence: Record<string, unknown>; created_at: string };
 const AGENT_URL = "/agent";
 
 const nav: Array<[View, string]> = [
@@ -150,6 +152,7 @@ const nav: Array<[View, string]> = [
   ["platforms", "Fontes"],
   ["inbox", "Gmail e Agenda"],
   ["notifications", "Notificações"],
+  ["interventions", "Intervenções"],
   ["automation", "Automação"],
   ["settings", "Preferências"],
   ["logs", "Auditoria"],
@@ -239,6 +242,7 @@ export default function Home() {
   });
   const [dashboard, setDashboard] = useState<PortalDashboard | null>(null);
   const [notifications, setNotifications] = useState<CareerNotification[]>([]);
+  const [interventions, setInterventions] = useState<HumanIntervention[]>([]);
   const [dashboardMessage, setDashboardMessage] = useState(
     "Sincronizando dados da VPS…",
   );
@@ -293,6 +297,9 @@ export default function Home() {
       ).catch(() => null);
       if (notificationResponse?.ok)
         setNotifications((await notificationResponse.json()) as CareerNotification[]);
+      const interventionResponse = await fetch("/api/portal/interventions?status=PENDING", { cache: "no-store" }).catch(() => null);
+      if (interventionResponse?.ok)
+        setInterventions((await interventionResponse.json()) as HumanIntervention[]);
       setDashboardMessage("Dados persistidos e atualizados pela VPS.");
     }
     void refreshDashboard();
@@ -665,6 +672,20 @@ export default function Home() {
     record(`${result.notifications} lembrete(s) de follow-up criado(s), sem envio automático.`);
   }
 
+  async function resolveIntervention(id: string, resolution: "RESOLVED" | "SKIPPED") {
+    const response = await fetch(`/api/portal/interventions/${id}/resolve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ resolution }),
+    });
+    if (!response.ok) {
+      record("Não foi possível atualizar a intervenção.");
+      return;
+    }
+    setInterventions((current) => current.filter((item) => item.id !== id));
+    record(resolution === "RESOLVED" ? "Intervenção concluída." : "Intervenção ignorada com registro.");
+  }
+
   return (
     <main className="shell">
       <aside className="sidebar">
@@ -700,6 +721,7 @@ export default function Home() {
             </p>
           </div>
           <div className="topbar-actions">
+            <button className="intervention-button" onClick={() => setView("interventions")}>Ações <span>{interventions.length}</span></button>
             <button className="notification-button" onClick={() => setView("notifications")}>Alertas <span>{notifications.filter((item) => !item.read_at).length}</span></button>
             <button className="danger" onClick={stopWork} disabled={!running}>PARAR AUTOMAÇÃO</button>
           </div>
@@ -1350,6 +1372,10 @@ export default function Home() {
         {view === "notifications" && <article className="panel">
           <div className="section-header"><div><h3>Central de notificações</h3><p>Entrevistas e propostas aparecem primeiro. Nenhum follow-up é enviado sem sua revisão.</p></div><button className="primary" onClick={() => void evaluateFollowups()}>Avaliar follow-ups</button></div>
           {notifications.length === 0 ? <p className="muted">Nenhuma notificação pendente.</p> : <div className="notification-list">{notifications.map((item) => <button key={item.id} className={`${item.priority.toLowerCase()} ${item.read_at ? "read" : ""}`} onClick={() => void markNotificationRead(item.id)}><span className="badge">{item.priority}</span><strong>{item.title}</strong><p>{item.body}</p><small>{new Date(item.created_at).toLocaleString("pt-BR")}{item.read_at ? " · lida" : " · toque para marcar como lida"}</small></button>)}</div>}
+        </article>}
+        {view === "interventions" && <article className="panel">
+          <div className="section-header"><div><h3>Intervenções humanas</h3><p>Somente decisões que exigem você. CAPTCHA, MFA e dados não comprovados nunca são contornados.</p></div><span className="badge">{interventions.length} pendente(s)</span></div>
+          {interventions.length === 0 ? <div className="empty-state"><strong>Tudo sob controle</strong><p className="muted">Nenhuma ação humana está pendente.</p></div> : <div className="intervention-list">{interventions.map((item) => <section key={item.id} className="intervention-card"><div><span className="badge">{item.reason.replaceAll("_", " ")}</span><strong>{item.title}</strong><p>{item.instructions}</p><small>{new Date(item.created_at).toLocaleString("pt-BR")}</small></div><div className="intervention-actions">{item.page_url && <a className="secondary-button" href={item.page_url} target="_blank" rel="noreferrer">Abrir página</a>}<button className="primary" onClick={() => void resolveIntervention(item.id, "RESOLVED")}>Concluí</button><button onClick={() => void resolveIntervention(item.id, "SKIPPED")}>Ignorar</button></div></section>)}</div>}
         </article>}
         {view === "inbox" && (
           <article className="panel">
