@@ -63,7 +63,7 @@ EXTERNAL_APPLY_CTA_PATTERN = (
 FINAL_SUBMIT_CTA_PATTERN = (
     r"enviar candidatura|enviar (?:minha |meu )?curr[ií]culo|enviar inscri[cç][aã]o|"
     r"finalizar candidatura|finalizar inscri[cç][aã]o|concluir candidatura|concluir inscri[cç][aã]o|"
-    r"confirmar candidatura|submit application|submit your application"
+    r"confirmar candidatura|candidatar(?:-se)?|submit application|submit your application"
 )
 
 NEXT_STEP_CTA_PATTERN = (
