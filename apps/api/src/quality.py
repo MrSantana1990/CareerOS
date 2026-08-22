@@ -66,6 +66,23 @@ def _overlap(required: list[str], verified: list[str], weight: int) -> tuple[int
     return score, sorted(matched), sorted(wanted - known)
 
 
+def match_radars(job: dict, radars: list[dict]) -> list[str]:
+    """Retorna os códigos dos radares HABILITADOS cujos roles/keywords têm
+    sobreposição com o título/descrição da vaga - primeira ligação real entre
+    os radares (Bloco B item 10, antes só CRUD sem nenhum efeito) e o motor
+    de score. Radar desligado nunca aparece aqui, mesmo que o texto combine -
+    combinar continua sendo só informativo até o radar ser ativado."""
+    haystack = normalize(f"{job.get('title', '')} {job.get('description', '')}")
+    matches: list[str] = []
+    for radar in radars:
+        if not radar.get("enabled"):
+            continue
+        terms = list(radar.get("roles") or []) + list(radar.get("keywords") or [])
+        if any(normalize(str(term)) and normalize(str(term)) in haystack for term in terms):
+            matches.append(str(radar["code"]))
+    return matches
+
+
 def score_job(job: dict, profile: dict, enabled_rules: set[str] | None = None) -> ScoreResult:
     enabled = enabled_rules or {"GUPY_BLOCK", "SPANISH_FLUENT_BLOCK", "ENGLISH_C1_REVIEW", "SUPPORT_N1_MINIMUM"}
     text = normalize(" ".join(str(job.get(key) or "") for key in ("title", "description", "location")))

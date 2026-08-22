@@ -13,7 +13,7 @@ from sqlalchemy import text
 
 from .database import SessionLocal
 from .auth import require_admin
-from .quality import job_fingerprint, normalize, score_job, transition_allowed
+from .quality import job_fingerprint, match_radars, normalize, score_job, transition_allowed
 from .preparation import application_strategy, idempotency_key, prepare_email_draft, route_resume
 from .communications import correlate_message, notification_priority
 
@@ -575,6 +575,15 @@ async def calculate_job_score(job_id: UUID, slug: str = Depends(require_admin)) 
         profile = (await session.execute(text("SELECT city, work_models, target_roles, salary_expectation FROM candidate_profiles WHERE organization_id=:organization_id AND deleted_at IS NULL LIMIT 1"), {"organization_id": org_id})).mappings().first() or {}
         verified = list((await session.scalars(text("SELECT name FROM skills WHERE organization_id=:organization_id AND verified=true AND deleted_at IS NULL"), {"organization_id": org_id})).all())
         codes = set((await session.scalars(text("SELECT code FROM career_rules WHERE organization_id=:organization_id AND enabled=true AND deleted_at IS NULL"), {"organization_id": org_id})).all())
+        radars = [
+            dict(row)
+            for row in (
+                await session.execute(
+                    text("SELECT code, enabled, roles, keywords FROM radars WHERE organization_id=:organization_id"),
+                    {"organization_id": org_id},
+                )
+            ).mappings()
+        ]
         profile_data = dict(profile)
         profile_data["verified_skills"] = verified
         salary_text = str(profile_data.get("salary_expectation") or "")
@@ -584,13 +593,15 @@ async def calculate_job_score(job_id: UUID, slug: str = Depends(require_admin)) 
         except ValueError:
             profile_data["salary_expectation_numeric"] = 0
         result = score_job(dict(job), profile_data, codes)
+        matched_radars = match_radars(dict(job), radars)
+        reasons = result.strengths + result.risks + result.blocking_rules + [f"Radar: {code}" for code in matched_radars]
         await session.execute(text("""
             INSERT INTO job_scores (id, organization_id, job_id, total, decision, dimensions, reasons, gaps, model_version)
             VALUES (gen_random_uuid(), :organization_id, :job_id, :total, :decision, CAST(:dimensions AS jsonb), CAST(:reasons AS jsonb), CAST(:gaps AS jsonb), 'V2.0')
             ON CONFLICT (job_id, model_version) DO UPDATE SET total=EXCLUDED.total, decision=EXCLUDED.decision,
               dimensions=EXCLUDED.dimensions, reasons=EXCLUDED.reasons, gaps=EXCLUDED.gaps, updated_at=now()
         """), {"organization_id": org_id, "job_id": job_id, "total": result.total, "decision": result.recommendation,
-               "dimensions": json.dumps(result.dimensions), "reasons": json.dumps(result.strengths + result.risks + result.blocking_rules), "gaps": json.dumps(result.gaps)})
+               "dimensions": json.dumps(result.dimensions), "reasons": json.dumps(reasons), "gaps": json.dumps(result.gaps)})
         new_status = "BLOCKED" if result.blocking_rules else "OPEN"
         await session.execute(text("UPDATE jobs SET validation_status=:status, validated_at=now(), updated_at=now() WHERE id=:id"), {"status": new_status, "id": job_id})
         if result.recommendation == "REVIEW":
