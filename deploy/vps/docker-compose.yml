@@ -44,6 +44,7 @@ services:
       REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
       ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:?Defina ADMIN_API_TOKEN}"
       CORS_ORIGINS: "https://carreira.helpsystempro.site"
+      GLOBAL_AUTOMATION_ENABLED: "false"
       AUTO_APPLY_ENABLED: "false"
       AUTO_APPLY_SAFETY_ACKNOWLEDGED: "false"
       AUTO_DISCOVERY_ENABLED: "false"
@@ -115,7 +116,7 @@ services:
       EXECUTOR_ID: "vps-integrations"
       BROWSER_HEADLESS: "true"
       BROWSER_CHANNEL: "chromium"
-      AUTO_APPLY_ENABLED: "true"
+      AUTO_APPLY_ENABLED: "false"
     volumes:
       - integrations_data:/data/runtime
       - resume_data:/data/resumes:ro
