@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import BrowserContext, Frame, Page, Playwright, async_playwright
 
 from .ats_detection import ATSMatch, detect_ats
+from .evidence_check import is_evidence_grounded
 from .hard_blocks import assess_hard_blocks, extract_salary_brl
 from .url_policy import authenticated_application_url
 from pydantic import BaseModel, Field
@@ -326,10 +327,16 @@ async def local_ai_advice(request: AIAdviceRequest, profile: ProfessionalProfile
     if not match:
         raise ValueError("A IA local não retornou JSON válido.")
     decision = json.loads(match.group(0))
+    evidence_text = " ".join(str(item) for item in decision.get("evidence") or [])
+    grounded = is_evidence_grounded(evidence_text, json.dumps(profile.model_dump(), ensure_ascii=False))
     if decision.get("action") == "ANSWER" and float(decision.get("confidence", 0)) < 0.85:
         decision["action"] = "ASK_USER"
         decision["answer"] = ""
         decision["reason"] = "Confiança abaixo do limite seguro de 85%."
+    elif decision.get("action") == "ANSWER" and not grounded:
+        decision["action"] = "ASK_USER"
+        decision["answer"] = ""
+        decision["reason"] = "Evidência citada não foi encontrada no perfil verificado."
     AI_DECISIONS.parent.mkdir(parents=True, exist_ok=True)
     with AI_DECISIONS.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"at": datetime.now(UTC).isoformat(), "input": user, "decision": decision}, ensure_ascii=False) + "\n")
@@ -845,7 +852,8 @@ async def ai_fill_simple_questions(root: Page | Frame, profile: ProfessionalProf
     for answer in parsed.get("answers", []):
         name, value = str(answer.get("name", "")), str(answer.get("answer", "")).strip()
         evidence = str(answer.get("evidence", "")).strip()
-        if (not value or not evidence or float(answer.get("confidence", 0)) < 0.85
+        grounded = is_evidence_grounded(evidence, payload_data["resume"], " ".join(profile.skills), " ".join(profile.target_roles))
+        if (not value or not evidence or float(answer.get("confidence", 0)) < 0.85 or not grounded
                 or re.search(r"como (?:uma )?ia|modelo de linguagem|apaixonad[oa]|sempre sonhei", value, re.I)):
             unresolved.append(name)
             continue
