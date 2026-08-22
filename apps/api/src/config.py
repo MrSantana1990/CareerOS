@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     database_url: str = "postgresql+asyncpg://careeros:careeros@localhost:5432/careeros"
     redis_url: str = "redis://localhost:6379/0"
+    global_automation_enabled: bool = False
     auto_apply_enabled: bool = False
     auto_apply_safety_acknowledged: bool = False
     auto_discovery_enabled: bool = False
