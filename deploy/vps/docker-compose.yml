@@ -117,6 +117,7 @@ services:
       BROWSER_HEADLESS: "true"
       BROWSER_CHANNEL: "chromium"
       AUTO_APPLY_ENABLED: "false"
+      DRY_RUN_ENABLED: "false"
     volumes:
       - integrations_data:/data/runtime
       - resume_data:/data/resumes:ro

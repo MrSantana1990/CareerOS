@@ -463,6 +463,13 @@ def environment_auto_apply_enabled() -> bool:
     return os.getenv("AUTO_APPLY_ENABLED", "false").lower() == "true"
 
 
+def dry_run_enabled() -> bool:
+    """Gate independente de AUTO_APPLY_ENABLED - permite religar o autoenvio
+    para testar o pipeline de ponta a ponta (Plano Mestre, Fase 28) sem que
+    nenhum clique de envio real aconteça."""
+    return os.getenv("DRY_RUN_ENABLED", "false").lower() == "true"
+
+
 def extract_resume_profile(source: Path) -> ProfessionalProfile:
     if source.suffix.lower() != ".pdf":
         raise HTTPException(status_code=400, detail="A importação automática atual exige currículo PDF.")
@@ -1163,10 +1170,10 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 if visible_submit is not None:
                     break
             can_submit = visible_submit is not None
-            live_allowed = (
-                request.confirm_live_submission
-                and environment_auto_apply_enabled()
-            )
+            would_apply = request.confirm_live_submission and environment_auto_apply_enabled()
+            live_allowed = would_apply and not dry_run_enabled()
+            if can_submit and would_apply and not live_allowed:
+                event("DRY_RUN_SUBMISSION_BLOCKED", application_id=application["id"])
             if can_submit and live_allowed:
                 before_submit = page.url
                 await visible_submit.click(timeout=8000)
@@ -1188,10 +1195,12 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                     )
             else:
                 application["status"] = "READY_FOR_REVIEW"
-                application["reason"] = (
-                    "Formulário preenchido; autoenvio desligado."
-                    if can_submit else "Formulário preparado; botão final não localizado."
-                )
+                if not can_submit:
+                    application["reason"] = "Formulário preparado; botão final não localizado."
+                elif dry_run_enabled():
+                    application["reason"] = "Formulário preenchido; modo DRY RUN ativo (nenhum envio real é permitido)."
+                else:
+                    application["reason"] = "Formulário preenchido; autoenvio desligado."
         except Exception as exc:
             application["status"] = "FAILED"
             application["reason"] = f"Falha na preparação: {type(exc).__name__}."
