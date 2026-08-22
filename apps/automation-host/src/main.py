@@ -60,6 +60,19 @@ EXTERNAL_APPLY_CTA_PATTERN = (
     r"apply now|apply for this|apply|easy apply|tenho interesse"
 )
 
+FINAL_SUBMIT_CTA_PATTERN = (
+    r"enviar candidatura|enviar (?:minha |meu )?curr[ií]culo|enviar inscri[cç][aã]o|"
+    r"finalizar candidatura|finalizar inscri[cç][aã]o|concluir candidatura|concluir inscri[cç][aã]o|"
+    r"confirmar candidatura|submit application|submit your application"
+)
+
+NEXT_STEP_CTA_PATTERN = (
+    r"pr[oó]xima(?:\s+etapa)?|avan[cç]ar|continuar(?!\s+sem)|revisar candidatura|revisar|"
+    r"next(?:\s+step)?|continue|review (?:your )?application|review"
+)
+
+MAX_APPLICATION_STEPS = 6
+
 INTERVENTION_PATTERNS = {
     "CAPTCHA": re.compile(r"captcha|recaptcha|não sou um robô", re.IGNORECASE),
     "MFA": re.compile(r"verification code|two-factor|multi-factor|código de verificação|autenticação em duas etapas", re.IGNORECASE),
@@ -955,27 +968,39 @@ async def search_roots(page: Page) -> list[Page | Frame]:
     return [page, *ats_frames]
 
 
-async def click_first_visible(page: Page, pattern: str) -> bool:
+async def find_first_visible(root: Page | Frame, pattern: str):
+    """Mesma busca robusta usada por click_first_visible, mas sem clicar -
+    usada tanto pra decidir se um CTA existe (antes de decidir clicar)
+    quanto para efetivamente clicar nele depois."""
     matcher = re.compile(pattern, re.IGNORECASE)
-    for root in await search_roots(page):
-        for role in ("button", "link"):
-            locator = root.get_by_role(role, name=matcher)
-            for index in range(min(await locator.count(), 8)):
-                item = locator.nth(index)
-                try:
-                    if await item.is_visible() and await item.is_enabled():
-                        await item.click(timeout=8000)
-                        return True
-                except Exception:
-                    continue
-        # Alguns portais desenham o CTA em div/span sem semântica de botão.
-        locator = root.locator("button, a, [role='button'], input[type='button'], input[type='submit']").filter(has_text=matcher)
-        for index in range(min(await locator.count(), 12)):
+    for role in ("button", "link"):
+        locator = root.get_by_role(role, name=matcher)
+        for index in range(min(await locator.count(), 8)):
             item = locator.nth(index)
             try:
-                if await item.is_visible():
-                    await item.click(timeout=8000)
-                    return True
+                if await item.is_visible() and await item.is_enabled():
+                    return item
+            except Exception:
+                continue
+    # Alguns portais desenham o CTA em div/span sem semântica de botão.
+    locator = root.locator("button, a, [role='button'], input[type='button'], input[type='submit']").filter(has_text=matcher)
+    for index in range(min(await locator.count(), 12)):
+        item = locator.nth(index)
+        try:
+            if await item.is_visible():
+                return item
+        except Exception:
+            continue
+    return None
+
+
+async def click_first_visible(page: Page, pattern: str) -> bool:
+    for root in await search_roots(page):
+        item = await find_first_visible(root, pattern)
+        if item is not None:
+            try:
+                await item.click(timeout=8000)
+                return True
             except Exception:
                 continue
     return False
@@ -1141,12 +1166,33 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 await suggest_source_connection(ats_match)
             filled: list[str] = []
             ai_filled: list[dict[str, object]] = []
-            unknown: list[str] = []
-            for root in roots:
-                filled.extend(await fill_known_fields(root, profile))
-                ai_result = await ai_fill_simple_questions(root, profile, application)
-                ai_filled.extend(ai_result.get("filled", []))
-                unknown.extend(await required_unknown_fields(root))
+
+            async def fill_current_step() -> list[str]:
+                step_unknown: list[str] = []
+                for root in await search_roots(page):
+                    filled.extend(await fill_known_fields(root, profile))
+                    ai_result = await ai_fill_simple_questions(root, profile, application)
+                    ai_filled.extend(ai_result.get("filled", []))
+                    step_unknown.extend(await required_unknown_fields(root))
+                return step_unknown
+
+            visible_submit = None
+            steps_advanced = 0
+            unknown = await fill_current_step()
+            while not unknown and visible_submit is None and steps_advanced < MAX_APPLICATION_STEPS:
+                for root in await search_roots(page):
+                    visible_submit = await find_first_visible(root, FINAL_SUBMIT_CTA_PATTERN)
+                    if visible_submit is not None:
+                        break
+                if visible_submit is not None:
+                    break
+                if not await click_first_visible(page, NEXT_STEP_CTA_PATTERN):
+                    break
+                steps_advanced += 1
+                await page.wait_for_timeout(1500)
+                await dismiss_overlays(page)
+                unknown = await fill_current_step()
+
             SCREENSHOTS.mkdir(parents=True, exist_ok=True)
             evidence = SCREENSHOTS / f"{application['id']}-prepared.png"
             await page.screenshot(path=str(evidence), full_page=True)
@@ -1155,6 +1201,8 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
             application["ai_answers"] = ai_filled
             application["unknown_fields"] = unknown
             application["dismissed_overlays"] = dismissed
+            if steps_advanced:
+                event("APPLICATION_STEPS_ADVANCED", application_id=application["id"], steps=steps_advanced)
             if unknown:
                 application["status"] = "MANUAL_REQUIRED"
                 application["reason"] = f"Resposta ainda não comprovada: {', '.join(unknown[:5])}."
@@ -1165,19 +1213,6 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                     page.url, {"fields": unknown[:20]},
                 )
                 continue
-            submit_pattern = re.compile(
-                r"enviar candidatura|enviar meu curr[ií]culo|submit application|finalizar candidatura|confirmar candidatura|concluir candidatura",
-                re.IGNORECASE,
-            )
-            visible_submit = None
-            for root in await search_roots(page):
-                submit = root.get_by_role("button", name=submit_pattern)
-                for index in range(min(await submit.count(), 5)):
-                    if await submit.nth(index).is_visible() and await submit.nth(index).is_enabled():
-                        visible_submit = submit.nth(index)
-                        break
-                if visible_submit is not None:
-                    break
             can_submit = visible_submit is not None
             would_apply = request.confirm_live_submission and environment_auto_apply_enabled()
             quota_available = remaining_quota > 0
