@@ -20,9 +20,10 @@ def test_cta_and_submit_lookup_use_search_roots() -> None:
     source = _source()
     # click_first_visible e a inspeção prévia percorrem as raízes (page + iframes de ATS conhecido).
     assert "for root in await search_roots(page):" in source
-    assert source.count("root.get_by_role(") >= 4
-    # botão final de envio também percorre as raízes antes de decidir can_submit
-    assert "for root in await search_roots(page):\n                submit = root.get_by_role" in source
+    assert source.count("root.get_by_role(") >= 3
+    # botão final de envio também percorre as raízes antes de decidir can_submit,
+    # via find_first_visible (mesma busca robusta usada pelo CTA inicial).
+    assert "visible_submit = await find_first_visible(root, FINAL_SUBMIT_CTA_PATTERN)" in source
 
 
 def test_form_filling_functions_operate_on_a_root_not_just_the_top_page() -> None:
@@ -30,9 +31,11 @@ def test_form_filling_functions_operate_on_a_root_not_just_the_top_page() -> Non
     assert "async def fill_known_fields(root: Page | Frame, profile: ProfessionalProfile)" in source
     assert "async def ai_fill_simple_questions(root: Page | Frame, profile: ProfessionalProfile, application: dict)" in source
     assert "async def required_unknown_fields(root: Page | Frame)" in source
-    # o preenchimento agrega resultados de todas as raízes antes de decidir o próximo passo
+    # o preenchimento agrega resultados de todas as raízes antes de decidir o próximo passo,
+    # em cada etapa do formulário (fill_current_step busca raízes frescas a cada chamada,
+    # porque clicar em "próxima etapa" pode mudar os frames disponíveis).
     assert "roots = await search_roots(page)" in source
-    assert "for root in roots:\n                filled.extend(await fill_known_fields(root, profile))" in source
+    assert "for root in await search_roots(page):\n                    filled.extend(await fill_known_fields(root, profile))" in source
 
 
 def test_detected_ats_checks_every_root_not_just_the_top_url() -> None:

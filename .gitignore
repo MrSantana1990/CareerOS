@@ -10,6 +10,7 @@ htmlcov/
 .runtime/
 automation-host.pid
 apps/automation-host/scripts/manual-ats-check-output/
+apps/automation-host/scripts/manual-multi-step-output/
 uploads/
 *.log
 *.pdf
