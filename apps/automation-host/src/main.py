@@ -566,7 +566,7 @@ def looks_like_job(platform: str, url: str, text: str) -> bool:
     if "gupy.io" in value or "gupy" in urlparse(url).netloc.lower():
         return False
     patterns = {
-        "InfoJobs": ("/vaga-de-emprego-", "/vagas-de-emprego/"),
+        "InfoJobs": ("/vaga-de-",),
         "Indeed": ("/viewjob", "jk="),
         "Catho": ("/vaga/", "/vagas/"),
         "LinkedIn": ("/jobs/view/",),
