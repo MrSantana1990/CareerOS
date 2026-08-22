@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import BrowserContext, Frame, Page, Playwright, async_playwright
 
 from .ats_detection import ATSMatch, detect_ats
+from .email_discovery import detect_email_application
 from .evidence_check import is_evidence_grounded
 from .hard_blocks import assess_hard_blocks, extract_salary_brl
 from .kill_switches import fetch_kill_switches, is_paused
@@ -444,6 +445,7 @@ def opportunity_feedback(title: str, body: str, settings: AutomationSettings) ->
     hard_block_result = assess_hard_blocks(text, salary)
     if hard_block_result.risks:
         reason += f" Atenção: {', '.join(hard_block_result.risks)}."
+    email_instruction = detect_email_application(f"{title} {body}")
     return {
         "region": region,
         "salary_brl": salary,
@@ -451,6 +453,11 @@ def opportunity_feedback(title: str, body: str, settings: AutomationSettings) ->
         "feedback": reason,
         "blocks": hard_block_result.blocks,
         "risks": hard_block_result.risks,
+        "email_application": (
+            {"email": email_instruction.email, "subject": email_instruction.subject, "context": email_instruction.context}
+            if email_instruction
+            else None
+        ),
     }
 
 
