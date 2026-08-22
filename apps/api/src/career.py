@@ -155,6 +155,45 @@ async def organization_id(slug: str) -> UUID:
     return value
 
 
+async def record_audit(
+    session, actor: str, entity: str, entity_id: UUID | None, action: str, metadata: dict[str, Any] | None = None
+) -> None:
+    """Grava um evento em audit_logs na MESMA sessão/transação da mudança que o originou,
+    para que auditoria e mudança sempre committem juntas ou nenhuma das duas commita.
+
+    audit_logs não tem organization_id (o schema é global desde a migration 0001) - este
+    sistema é single-tenant hoje, então isso não perde informação na prática.
+    """
+    await session.execute(
+        text(
+            """
+            INSERT INTO audit_logs (id, actor, entity, entity_id, action, metadata, correlation_id)
+            VALUES (gen_random_uuid(), :actor, :entity, :entity_id, :action, CAST(:metadata AS jsonb), gen_random_uuid())
+            """
+        ),
+        {"actor": actor, "entity": entity, "entity_id": entity_id, "action": action, "metadata": json.dumps(metadata or {})},
+    )
+
+
+@router.get("/audit-logs")
+async def list_audit_logs(limit: int = Query(default=100, ge=1, le=500), slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, timestamp, actor, entity, entity_id, action, metadata, correlation_id
+                    FROM audit_logs
+                    ORDER BY timestamp DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"limit": limit},
+            )
+        ).mappings()
+    return [dict(row) for row in rows]
+
+
 @router.get("/sources")
 async def list_sources(enabled: bool | None = None, slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
     org_id = await organization_id(slug)
@@ -189,6 +228,8 @@ async def save_source(payload: SourceConnectionInput, slug: str = Depends(requir
     """)
     async with SessionLocal() as session:
         row = (await session.execute(query, values)).mappings().one()
+        await record_audit(session, slug, "source_connections", row["id"], "SOURCE_CHANGED",
+                            {"adapter": row["adapter"], "account_key": row["account_key"], "enabled": row["enabled"]})
         await session.commit()
     return dict(row)
 
@@ -720,6 +761,8 @@ async def save_rule(
     values["configuration"] = json.dumps(payload.configuration)
     async with SessionLocal() as session:
         row = (await session.execute(query, values)).mappings().one()
+        await record_audit(session, slug, "career_rules", row["id"], "RULE_CHANGED",
+                            {"code": row["code"], "rule_type": row["rule_type"], "enabled": row["enabled"]})
         await session.commit()
     return dict(row)
 
@@ -773,9 +816,10 @@ async def decide(
             query,
             {"id": decision_id, "organization_id": org_id, "status": payload.decision},
         )
+        if not changed:
+            raise HTTPException(status_code=404, detail="Decisão pendente não encontrada.")
+        await record_audit(session, slug, "decision_inbox", decision_id, f"DECISION_{payload.decision}")
         await session.commit()
-    if not changed:
-        raise HTTPException(status_code=404, detail="Decisão pendente não encontrada.")
     return {"status": payload.decision}
 
 
