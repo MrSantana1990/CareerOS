@@ -107,6 +107,10 @@ type GoogleStatus = {
   alerts: number;
   last_items: CareerMail[];
 };
+type SystemStatus = {
+  status: { auto_apply_enabled: boolean };
+  health: { status: string; checks: Record<string, string> };
+};
 type Profile = {
   full_name: string;
   email: string;
@@ -259,6 +263,7 @@ export default function Home() {
     last_items: [],
   });
   const [dashboard, setDashboard] = useState<PortalDashboard | null>(null);
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [notifications, setNotifications] = useState<CareerNotification[]>([]);
   const [interventions, setInterventions] = useState<HumanIntervention[]>([]);
   const [analytics, setAnalytics] = useState<CareerAnalytics | null>(null);
@@ -328,6 +333,8 @@ export default function Home() {
         setAnalytics(nextAnalytics);
         if (nextAnalytics.goals) setGoalDraft(nextAnalytics.goals);
       }
+      const systemStatusResponse = await fetch("/api/portal/system-status", { cache: "no-store" }).catch(() => null);
+      setSystemStatus(systemStatusResponse?.ok ? ((await systemStatusResponse.json()) as SystemStatus) : null);
       setDashboardMessage("Dados persistidos e atualizados pela VPS.");
     }
     void refreshDashboard();
@@ -872,8 +879,15 @@ export default function Home() {
                 </div>
                 <ul className="engine-list">
                   <li>
-                    <span className="status-dot online" />
-                    Orquestrador, API, banco e fila: online
+                    <span
+                      className={`status-dot ${systemStatus ? (systemStatus.health.status === "ok" ? "online" : "warning") : ""}`}
+                    />
+                    Core (API e banco):{" "}
+                    {systemStatus
+                      ? systemStatus.health.status === "ok"
+                        ? "online"
+                        : "degradado"
+                      : "verificando…"}
                   </li>
                   <li>
                     <span
@@ -894,8 +908,15 @@ export default function Home() {
                       : "OAuth pendente na VPS"}
                   </li>
                   <li>
-                    <span className="status-dot safe" />
-                    Autoenvio: bloqueado por segurança
+                    <span
+                      className={`status-dot ${systemStatus?.status.auto_apply_enabled ? "warning" : "safe"}`}
+                    />
+                    Autoenvio:{" "}
+                    {systemStatus
+                      ? systemStatus.status.auto_apply_enabled
+                        ? "LIGADO — candidaturas reais serão enviadas"
+                        : "bloqueado por segurança"
+                      : "verificando…"}
                   </li>
                 </ul>
                 <small className="muted">{dashboardMessage}</small>
