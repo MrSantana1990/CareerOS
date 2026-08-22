@@ -33,6 +33,33 @@ class DecisionInput(BaseModel):
     decision: Literal["APPROVED", "DISCARDED"]
 
 
+class RadarInput(BaseModel):
+    code: str = Field(min_length=2, max_length=60, pattern=r"^[A-Z0-9_]+$")
+    label: str = Field(min_length=3, max_length=160)
+    enabled: bool = False
+    autonomy_mode: Literal["MANUAL", "ASSISTED", "AUTONOMOUS"] = "MANUAL"
+    schedule_expression: str | None = Field(default=None, max_length=120)
+    daily_limit: int | None = Field(default=None, ge=1, le=500)
+    score_threshold: int | None = Field(default=None, ge=0, le=100)
+    locations: list[str] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    exclusions: list[str] = Field(default_factory=list)
+    salary_floor: float | None = Field(default=None, ge=0)
+    work_model: str | None = Field(default=None, max_length=30)
+    languages: dict[str, str] = Field(default_factory=dict)
+    sources: list[str] = Field(default_factory=list)
+
+
+class RadarRuleInput(BaseModel):
+    code: str = Field(min_length=2, max_length=100, pattern=r"^[A-Z0-9_]+$")
+    label: str = Field(min_length=3, max_length=200)
+    rule_type: Literal["BLOCK", "REVIEW", "BOOST", "PENALTY"]
+    configuration: dict[str, Any]
+    priority: int = Field(default=100, ge=1, le=1000)
+    enabled: bool = True
+
+
 class ProfileInput(BaseModel):
     full_name: str = Field(min_length=2, max_length=160)
     email: str = Field(min_length=5, max_length=254)
@@ -717,6 +744,140 @@ async def save_rule(
 
     values = payload.model_dump()
     values["organization_id"] = org_id
+    values["configuration"] = json.dumps(payload.configuration)
+    async with SessionLocal() as session:
+        row = (await session.execute(query, values)).mappings().one()
+        await session.commit()
+    return dict(row)
+
+
+async def radar_id_by_code(organization_id_value: UUID, code: str) -> UUID:
+    async with SessionLocal() as session:
+        value = await session.scalar(
+            text("SELECT id FROM radars WHERE organization_id = :organization_id AND code = :code"),
+            {"organization_id": organization_id_value, "code": code},
+        )
+    if not value:
+        raise HTTPException(status_code=404, detail="Radar não encontrado.")
+    return value
+
+
+@router.get("/radars")
+async def list_radars(slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, code, label, enabled, autonomy_mode, schedule_expression,
+                           daily_limit, score_threshold, locations, roles, keywords,
+                           exclusions, salary_floor, work_model, languages, sources
+                    FROM radars
+                    WHERE organization_id = :organization_id
+                    ORDER BY code
+                    """
+                ),
+                {"organization_id": org_id},
+            )
+        ).mappings()
+    return [dict(row) for row in rows]
+
+
+@router.put("/radars/{code}")
+async def save_radar(code: str, payload: RadarInput, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    if code != payload.code:
+        raise HTTPException(status_code=400, detail="O código da rota deve ser igual ao payload.")
+    org_id = await organization_id(slug)
+    query = text(
+        """
+        INSERT INTO radars
+            (id, organization_id, code, label, enabled, autonomy_mode, schedule_expression,
+             daily_limit, score_threshold, locations, roles, keywords, exclusions,
+             salary_floor, work_model, languages, sources)
+        VALUES
+            (gen_random_uuid(), :organization_id, :code, :label, :enabled, :autonomy_mode,
+             :schedule_expression, :daily_limit, :score_threshold, CAST(:locations AS jsonb),
+             CAST(:roles AS jsonb), CAST(:keywords AS jsonb), CAST(:exclusions AS jsonb),
+             :salary_floor, :work_model, CAST(:languages AS jsonb), CAST(:sources AS jsonb))
+        ON CONFLICT (organization_id, code)
+        DO UPDATE SET label = EXCLUDED.label,
+                      enabled = EXCLUDED.enabled,
+                      autonomy_mode = EXCLUDED.autonomy_mode,
+                      schedule_expression = EXCLUDED.schedule_expression,
+                      daily_limit = EXCLUDED.daily_limit,
+                      score_threshold = EXCLUDED.score_threshold,
+                      locations = EXCLUDED.locations,
+                      roles = EXCLUDED.roles,
+                      keywords = EXCLUDED.keywords,
+                      exclusions = EXCLUDED.exclusions,
+                      salary_floor = EXCLUDED.salary_floor,
+                      work_model = EXCLUDED.work_model,
+                      languages = EXCLUDED.languages,
+                      sources = EXCLUDED.sources,
+                      updated_at = now()
+        RETURNING id, code, label, enabled, autonomy_mode, schedule_expression, daily_limit,
+                  score_threshold, locations, roles, keywords, exclusions, salary_floor,
+                  work_model, languages, sources
+        """
+    )
+    values = payload.model_dump()
+    values["organization_id"] = org_id
+    for key in ("locations", "roles", "keywords", "exclusions", "languages", "sources"):
+        values[key] = json.dumps(values[key])
+    async with SessionLocal() as session:
+        row = (await session.execute(query, values)).mappings().one()
+        await session.commit()
+    return dict(row)
+
+
+@router.get("/radars/{code}/rules")
+async def list_radar_rules(code: str, slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    org_id = await organization_id(slug)
+    r_id = await radar_id_by_code(org_id, code)
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, code, label, rule_type, configuration, priority, enabled
+                    FROM radar_rules
+                    WHERE organization_id = :organization_id AND radar_id = :radar_id
+                    ORDER BY priority, code
+                    """
+                ),
+                {"organization_id": org_id, "radar_id": r_id},
+            )
+        ).mappings()
+    return [dict(row) for row in rows]
+
+
+@router.put("/radars/{code}/rules/{rule_code}")
+async def save_radar_rule(
+    code: str, rule_code: str, payload: RadarRuleInput, slug: str = Depends(require_admin)
+) -> dict[str, Any]:
+    if rule_code != payload.code:
+        raise HTTPException(status_code=400, detail="O código da rota deve ser igual ao payload.")
+    org_id = await organization_id(slug)
+    r_id = await radar_id_by_code(org_id, code)
+    query = text(
+        """
+        INSERT INTO radar_rules (id, organization_id, radar_id, code, label, rule_type, configuration, priority, enabled)
+        VALUES (gen_random_uuid(), :organization_id, :radar_id, :code, :label, :rule_type,
+                CAST(:configuration AS jsonb), :priority, :enabled)
+        ON CONFLICT (radar_id, code)
+        DO UPDATE SET label = EXCLUDED.label,
+                      rule_type = EXCLUDED.rule_type,
+                      configuration = EXCLUDED.configuration,
+                      priority = EXCLUDED.priority,
+                      enabled = EXCLUDED.enabled,
+                      updated_at = now()
+        RETURNING id, code, label, rule_type, configuration, priority, enabled
+        """
+    )
+    values = payload.model_dump()
+    values["organization_id"] = org_id
+    values["radar_id"] = r_id
     values["configuration"] = json.dumps(payload.configuration)
     async with SessionLocal() as session:
         row = (await session.execute(query, values)).mappings().one()
