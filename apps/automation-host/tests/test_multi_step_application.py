@@ -43,6 +43,18 @@ def test_unknown_required_field_stops_advancing_even_mid_flow() -> None:
     assert 'application["status"] = "MANUAL_REQUIRED"' in body
 
 
+def test_final_submit_pattern_recognizes_candidatar_se() -> None:
+    """Achado real (vaga real via ATS Abler): alguns portais reusam o mesmo
+    texto do CTA inicial ("Candidatar-se") como botão final de envio do
+    formulário - sem isso, o sistema achava a vaga, preenchia tudo, e nunca
+    reconhecia o próprio botão de enviar, mesmo em formulário de etapa única."""
+    source = _source()
+    start = source.index("FINAL_SUBMIT_CTA_PATTERN = (")
+    end = source.index(")\n", start)
+    block = source[start:end]
+    assert r"candidatar(?:-se)?" in block
+
+
 def test_steps_advanced_is_audited() -> None:
     source = _source()
     assert 'event("APPLICATION_STEPS_ADVANCED", application_id=application["id"], steps=steps_advanced)' in source
