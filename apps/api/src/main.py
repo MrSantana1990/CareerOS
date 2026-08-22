@@ -1,10 +1,13 @@
+import json
 import logging
 import uuid
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from starlette.responses import Response
 
@@ -97,6 +100,57 @@ async def workspace(organization_slug: str = Depends(require_admin)) -> dict[str
         row = (await session.execute(query, {"slug": organization_slug})).mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Organização não encontrada.")
+    return dict(row)
+
+
+KILL_SWITCH_KEYS = {
+    "PAUSE_ALL",
+    "PAUSE_SUPPORT",
+    "PAUSE_DATA",
+    "PAUSE_INTERNATIONAL",
+    "PAUSE_EMAIL_APPLY",
+    "PAUSE_BROWSER_APPLY",
+    "PAUSE_DISCOVERY",
+}
+
+
+class KillSwitchInput(BaseModel):
+    paused: bool
+    reason: str = Field(default="", max_length=500)
+
+
+@app.get("/api/v1/system/kill-switches", tags=["system"])
+async def list_kill_switches(_: str = Depends(require_admin)) -> dict[str, Any]:
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                text("SELECT key, value FROM system_settings WHERE key = ANY(:keys)"),
+                {"keys": list(KILL_SWITCH_KEYS)},
+            )
+        ).mappings()
+        stored = {row["key"]: row["value"] for row in rows}
+    return {key: stored.get(key, {"paused": False, "reason": ""}) for key in sorted(KILL_SWITCH_KEYS)}
+
+
+@app.put("/api/v1/system/kill-switches/{key}", tags=["system"])
+async def set_kill_switch(key: str, payload: KillSwitchInput, _: str = Depends(require_admin)) -> dict[str, Any]:
+    if key not in KILL_SWITCH_KEYS:
+        raise HTTPException(status_code=404, detail="Kill switch desconhecido.")
+    query = text(
+        """
+        INSERT INTO system_settings (id, key, value)
+        VALUES (gen_random_uuid(), :key, CAST(:value AS jsonb))
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, version = system_settings.version + 1, updated_at = now()
+        RETURNING key, value
+        """
+    )
+    async with SessionLocal() as session:
+        row = (
+            await session.execute(
+                query, {"key": key, "value": json.dumps({"paused": payload.paused, "reason": payload.reason})}
+            )
+        ).mappings().one()
+        await session.commit()
     return dict(row)
 
 

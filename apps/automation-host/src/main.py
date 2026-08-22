@@ -18,6 +18,7 @@ from playwright.async_api import BrowserContext, Frame, Page, Playwright, async_
 
 from .ats_detection import ATSMatch, detect_ats
 from .hard_blocks import assess_hard_blocks, extract_salary_brl
+from .kill_switches import fetch_kill_switches, is_paused
 from .url_policy import authenticated_application_url
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -979,6 +980,12 @@ async def submission_confirmed(page: Page, previous_url: str) -> bool:
 
 
 async def execute_application_queue(request: ExecuteRequest) -> None:
+    switches = await asyncio.to_thread(fetch_kill_switches, CAREER_API_URL, CAREER_ADMIN_TOKEN)
+    kill_status = is_paused(switches, "PAUSE_ALL", "PAUSE_BROWSER_APPLY", fail_closed=True)
+    if kill_status.paused:
+        event("EXECUTION_PAUSED", reason=kill_status.reason, reachable=kill_status.reachable)
+        update(status="paused", message=f"Execução pausada: {kill_status.reason or 'kill switch ativo'}.")
+        return
     settings = AutomationSettings.model_validate(load_json(SETTINGS_DATA, {}))
     profile = ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {}))
     applications = load_json(APPLICATIONS, [])
@@ -1212,6 +1219,12 @@ async def analyze_all_jobs(minimum_score: int) -> dict[str, int]:
 
 
 async def full_daily_pipeline() -> None:
+    switches = await asyncio.to_thread(fetch_kill_switches, CAREER_API_URL, CAREER_ADMIN_TOKEN)
+    kill_status = is_paused(switches, "PAUSE_ALL", fail_closed=False)
+    if kill_status.paused:
+        event("DAILY_PIPELINE_PAUSED", reason=kill_status.reason)
+        update(status="paused", message=f"Ciclo diário pausado: {kill_status.reason or 'kill switch ativo'}.")
+        return
     profile = await sync_profile_from_core()
     if profile is None:
         profile = ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {}))
