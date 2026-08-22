@@ -16,6 +16,7 @@ from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import BrowserContext, Frame, Page, Playwright, async_playwright
 
+from .anti_spam import remaining_daily_quota
 from .ats_detection import ATSMatch, detect_ats
 from .email_discovery import detect_email_application
 from .evidence_check import is_evidence_grounded
@@ -1011,6 +1012,7 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
     settings = AutomationSettings.model_validate(load_json(SETTINGS_DATA, {}))
     profile = ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {}))
     applications = load_json(APPLICATIONS, [])
+    remaining_quota = remaining_daily_quota(applications, settings.daily_target, datetime.now(UTC))
     def retryable(application: dict) -> bool:
         if application.get("status") == "READY_TO_PREPARE":
             return True
@@ -1178,8 +1180,11 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                     break
             can_submit = visible_submit is not None
             would_apply = request.confirm_live_submission and environment_auto_apply_enabled()
-            live_allowed = would_apply and not dry_run_enabled()
-            if can_submit and would_apply and not live_allowed:
+            quota_available = remaining_quota > 0
+            live_allowed = would_apply and not dry_run_enabled() and quota_available
+            if can_submit and would_apply and not dry_run_enabled() and not quota_available:
+                event("DAILY_LIMIT_REACHED", application_id=application["id"], daily_target=settings.daily_target)
+            elif can_submit and would_apply and not live_allowed:
                 event("DRY_RUN_SUBMISSION_BLOCKED", application_id=application["id"])
             if can_submit and live_allowed:
                 before_submit = page.url
@@ -1190,6 +1195,7 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                     application["submitted_at"] = datetime.now(UTC).isoformat()
                     application["reason"] = "Envio confirmado pela plataforma."
                     submitted += 1
+                    remaining_quota -= 1
                     event("APPLICATION_SUBMITTED", application_id=application["id"])
                 else:
                     application["status"] = "MANUAL_REQUIRED"
@@ -1204,6 +1210,8 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 application["status"] = "READY_FOR_REVIEW"
                 if not can_submit:
                     application["reason"] = "Formulário preparado; botão final não localizado."
+                elif would_apply and not quota_available:
+                    application["reason"] = f"Formulário preenchido; limite diário de {settings.daily_target} candidaturas já atingido."
                 elif dry_run_enabled():
                     application["reason"] = "Formulário preenchido; modo DRY RUN ativo (nenhum envio real é permitido)."
                 else:
