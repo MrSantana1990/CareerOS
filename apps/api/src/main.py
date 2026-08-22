@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
+import redis.asyncio as redis_async
 from sqlalchemy import text
 from starlette.responses import Response
 
@@ -56,6 +57,32 @@ async def ready() -> JSONResponse:
     except Exception:
         logger.exception("readiness_dependency_failed", extra={"dependency": "database"})
         checks["database"] = "unavailable"
+    status = 200 if all(value == "ok" for value in checks.values()) else 503
+    return JSONResponse({"status": "ok" if status == 200 else "degraded", "checks": checks}, status_code=status)
+
+
+@app.get("/health/deep", tags=["health"])
+async def deep() -> JSONResponse:
+    """Container `Up` não significa saudável (Fase 24 do Plano Mestre) — confere
+    as dependências de fato, não só se o processo subiu."""
+    checks: dict[str, str] = {}
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception:
+        logger.exception("deep_health_dependency_failed", extra={"dependency": "database"})
+        checks["database"] = "unavailable"
+    try:
+        client = redis_async.from_url(settings.redis_url, socket_connect_timeout=3)
+        try:
+            await client.ping()
+            checks["redis"] = "ok"
+        finally:
+            await client.aclose()
+    except Exception:
+        logger.exception("deep_health_dependency_failed", extra={"dependency": "redis"})
+        checks["redis"] = "unavailable"
     status = 200 if all(value == "ok" for value in checks.values()) else 503
     return JSONResponse({"status": "ok" if status == 200 else "degraded", "checks": checks}, status_code=status)
 
