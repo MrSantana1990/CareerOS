@@ -19,7 +19,8 @@ from playwright.async_api import BrowserContext, Frame, Page, Playwright, async_
 from .anti_spam import remaining_daily_quota
 from .ats_detection import ATSMatch, detect_ats
 from .core_bridge import (CoreSyncRecord, build_job_record, build_prepare_record,
-                          build_score_record, guess_company, is_due, is_eligible_for_prepare,
+                          build_score_record, build_transition_record, guess_company, is_due,
+                          is_eligible_for_prepare, map_local_status_to_core_transition,
                           send_core_sync)
 from .email_discovery import detect_email_application
 from .evidence_check import is_evidence_grounded
@@ -1117,13 +1118,27 @@ def remember_layout(application: dict, stage: str, details: dict | None = None) 
 
 
 async def submission_confirmed(page: Page, previous_url: str) -> bool:
+    """CONFIRMED exige evidência positiva real - nunca promove por
+    inferência fraca. O texto forte de sucesso já basta sozinho. Mudança
+    de URL NUNCA basta sozinha: qualquer etapa intermediária do fluxo
+    (revisão, confirmação de dados) também muda a URL e quase sempre tem
+    "application" no caminho - isso já foi causa real de falso positivo.
+    Só conta como confirmação corroborada por URL quando a página também
+    tem alguma palavra de agradecimento/recebimento, mesmo que mais fraca
+    que o padrão forte acima."""
     body = (await page.locator("body").inner_text(timeout=10_000))[:40_000]
     success_text = re.search(
         r"candidatura (?:foi )?enviada|candidatura realizada|cv enviado|inscri[cç][aã]o (?:foi )?conclu[ií]da|application submitted|successfully applied|já se candidatou",
         body, re.IGNORECASE,
     )
-    success_url = page.url != previous_url and bool(re.search(r"success|confirmation|application", page.url, re.IGNORECASE))
-    return bool(success_text or success_url)
+    if success_text:
+        return True
+    url_looks_like_success = page.url != previous_url and bool(
+        re.search(r"success|confirmation|thank-?you", page.url, re.IGNORECASE)
+    )
+    if not url_looks_like_success:
+        return False
+    return bool(re.search(r"obrigado|recebemos|received|thank you", body, re.IGNORECASE))
 
 
 async def execute_application_queue(request: ExecuteRequest) -> None:
@@ -1187,11 +1202,20 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 remember_layout(application, "closed_vacancy")
                 continue
             if re.search(r"candidatura realizada(?: hoje)?|cv enviado|já se candidatou|application submitted|successfully applied", body, re.IGNORECASE):
-                application["status"] = "APPLIED"
-                application["submitted_at"] = application.get("submitted_at") or datetime.now(UTC).isoformat()
-                application["reason"] = "Candidatura confirmada pela plataforma (já enviada)."
-                submitted += 1
-                event("APPLICATION_ALREADY_SUBMITTED", application_id=application["id"])
+                # A página INDICA candidatura já enviada, mas isso é uma inferência sobre o
+                # estado da página, não prova de primeira mão de que este sistema enviou -
+                # pode ser candidatura manual anterior, cache da plataforma, ou até engano.
+                # Nunca vira APPLIED sozinho; precisa de confirmação humana.
+                application["status"] = "MANUAL_REQUIRED"
+                application["reason"] = ("A página indica candidatura já enviada para esta vaga, mas o "
+                                          "sistema não tem evidência própria do envio - confirme manualmente.")
+                event("APPLICATION_ALREADY_SUBMITTED_UNCONFIRMED", application_id=application["id"])
+                await report_intervention(
+                    application, "SUBMISSION_UNCONFIRMED", "Confirme se a candidatura já foi enviada",
+                    "A página mostra uma mensagem de candidatura já realizada, mas o sistema não tem "
+                    "evidência própria de ter enviado. Verifique manualmente antes de contar como concluída.",
+                    page.url,
+                )
                 continue
             if INTERVENTION_PATTERNS["MFA"].search(body):
                 application["status"] = "MANUAL_REQUIRED"
@@ -1362,6 +1386,7 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
             remember_layout(application, "exception", {"error": type(exc).__name__, "url": page.url[:160]})
         finally:
             save_json(APPLICATIONS, applications)
+            await sync_status_to_core(application)
     update(status="completed", message=f"Preparação concluída; {submitted} candidaturas enviadas.")
     event("APPLICATION_RUN_COMPLETED", submitted=submitted, inspected=len(pending))
 
@@ -1517,7 +1542,33 @@ def _advance_core_sync_chain(record: CoreSyncRecord, response: dict | None) -> l
         event("CORE_APPLICATION_PREPARED", correlation_id=record.correlation_id,
               core_application_id=application.get("id"), resume_version_id=application.get("resume_version_id"))
         return []
+    if record.kind == "TRANSITION":
+        event("CORE_TRANSITION_APPLIED", correlation_id=record.correlation_id,
+              to_status=record.payload.get("status"))
+        return []
     return []
+
+
+async def sync_status_to_core(application: dict) -> None:
+    """Reflete o status local como uma transição real no Core - vocabulário
+    canônico único (core_bridge.LOCAL_STATUS_TO_CORE_TRANSITION), nunca uma
+    segunda máquina de estados independente. Nunca bloqueia o fluxo local:
+    se o Core ainda não preparou esta vaga (sem core_application_id) ou
+    não há transição aplicável pro status atual, não faz nada."""
+    if not CAREER_ADMIN_TOKEN:
+        return
+    entry = _load_core_sync_links().get(application["id"], {})
+    core_application_id = entry.get("core_application_id")
+    if not core_application_id:
+        return
+    target_status = map_local_status_to_core_transition(str(application.get("status", "")))
+    if not target_status or entry.get("last_core_transition") == target_status:
+        return
+    enqueue_core_sync(build_transition_record(
+        core_application_id=core_application_id, target_status=target_status,
+        reason=str(application.get("reason", "")), correlation_id=application["id"],
+    ))
+    _update_core_sync_link(application["id"], last_core_transition=target_status)
 
 
 async def core_sync_scheduler() -> None:

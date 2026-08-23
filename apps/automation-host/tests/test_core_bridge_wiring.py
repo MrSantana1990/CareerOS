@@ -8,7 +8,8 @@ def _source() -> str:
 def test_main_imports_core_bridge_helpers() -> None:
     source = _source()
     assert "from .core_bridge import (CoreSyncRecord, build_job_record, build_prepare_record," in source
-    assert "build_score_record, guess_company, is_due, is_eligible_for_prepare," in source
+    assert "build_score_record, build_transition_record, guess_company, is_due," in source
+    assert "is_eligible_for_prepare, map_local_status_to_core_transition," in source
 
 
 def test_core_sync_scheduler_treats_dead_letter_as_a_hard_stop_not_infinite_retry() -> None:
@@ -78,6 +79,50 @@ def test_core_sync_scheduler_advances_the_chain_only_on_success() -> None:
     assert "remaining.extend(_advance_core_sync_chain(record, result.response))" in body
 
 
+def test_sync_status_to_core_never_blocks_without_a_core_application() -> None:
+    source = _source()
+    start = source.index("async def sync_status_to_core(")
+    body = source[start : start + 900]
+    assert "if not core_application_id:" in body
+    assert "return" in body
+
+
+def test_sync_status_to_core_deduplicates_repeated_identical_transitions() -> None:
+    source = _source()
+    start = source.index("async def sync_status_to_core(")
+    body = source[start : start + 900]
+    assert 'entry.get("last_core_transition") == target_status' in body
+
+
+def test_execute_application_queue_syncs_status_in_the_existing_finally_block() -> None:
+    # Aproveita o finally já existente (roda em todo continue, sem precisar
+    # reestruturar a função inteira) em vez de duplicar a chamada em cada
+    # um dos ramos que definem application["status"].
+    source = _source()
+    start = source.index("        finally:\n            save_json(APPLICATIONS, applications)")
+    body = source[start : start + 200]
+    assert "await sync_status_to_core(application)" in body
+
+
+def test_already_submitted_page_text_never_becomes_applied_automatically() -> None:
+    source = _source()
+    start = source.index('if re.search(r"candidatura realizada(?: hoje)?')
+    body = source[start : start + 1200]
+    assert 'application["status"] = "MANUAL_REQUIRED"' in body
+    assert '"SUBMISSION_UNCONFIRMED"' in body
+    assert 'application["status"] = "APPLIED"' not in body
+
+
+def test_submission_confirmed_never_trusts_url_change_alone() -> None:
+    source = _source()
+    start = source.index("async def submission_confirmed(")
+    end = source.index("\nasync def execute_application_queue(")
+    body = source[start:end]
+    assert "if success_text:\n        return True" in body
+    assert "if not url_looks_like_success:\n        return False" in body
+    assert 're.search(r"obrigado|recebemos|received|thank you"' in body
+
+
 def test_advance_core_sync_chain_never_writes_the_outbox_directly() -> None:
     # Bug real encontrado em produção: enqueue_core_sync() dentro de
     # _advance_core_sync_chain acrescentava um registro novo no outbox,
@@ -88,7 +133,7 @@ def test_advance_core_sync_chain_never_writes_the_outbox_directly() -> None:
     # registros novos, quem escreve é sempre o scheduler.
     source = _source()
     start = source.index("def _advance_core_sync_chain(")
-    end = source.index("\nasync def core_sync_scheduler(")
+    end = source.index("\nasync def sync_status_to_core(")
     body = source[start:end]
     assert "enqueue_core_sync(" not in body
     assert "-> list[CoreSyncRecord]:" in body

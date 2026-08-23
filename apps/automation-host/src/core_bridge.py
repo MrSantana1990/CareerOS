@@ -152,6 +152,40 @@ def is_eligible_for_prepare(total: int, recommendation: str) -> bool:
     return total >= PREPARE_SCORE_THRESHOLD and recommendation not in NOT_ELIGIBLE_RECOMMENDATIONS
 
 
+# Vocabulário canônico único: os status locais do automation-host (o que
+# roda de verdade) mapeiam pra sequência real de transições do Core
+# (apps/api/src/quality.py::ALLOWED_TRANSITIONS) - nunca duas máquinas de
+# estado independentes. BLOCKED/CLOSED não têm alvo direto a partir de
+# PREPARING no schema real do Core (só existem como validation_status de
+# vaga ou como transição pré-candidatura, não pós-prepare) - mapeados pra
+# ERROR com o motivo real preservado no campo reason, em vez de inventar
+# um estado novo no Core (isso exigiria migration, fora do escopo desta
+# ponte). Status sem entrada aqui (INSPECTING, ANALYZED, ...) ainda não
+# chegaram no estágio de candidatura de verdade - não têm transição.
+LOCAL_STATUS_TO_CORE_TRANSITION = {
+    "READY_FOR_REVIEW": "READY",
+    "APPLIED": "CONFIRMED",
+    "MANUAL_REQUIRED": "MANUAL_REQUIRED",
+    "BLOCKED": "ERROR",
+    "CLOSED": "ERROR",
+    "FAILED": "ERROR",
+}
+
+
+def map_local_status_to_core_transition(local_status: str) -> str | None:
+    return LOCAL_STATUS_TO_CORE_TRANSITION.get(local_status)
+
+
+def build_transition_record(*, core_application_id: str, target_status: str, reason: str,
+                             correlation_id: str) -> CoreSyncRecord:
+    return CoreSyncRecord(
+        kind="TRANSITION",
+        payload={"application_id": core_application_id, "status": target_status, "reason": reason[:2000]},
+        idempotency_key=f"transition:{core_application_id}:{target_status}",
+        correlation_id=correlation_id,
+    )
+
+
 def backoff_seconds(attempts: int) -> int:
     index = min(max(attempts, 0), len(BACKOFF_SECONDS) - 1)
     return BACKOFF_SECONDS[index]
@@ -179,14 +213,20 @@ def _endpoint_for(record: CoreSyncRecord) -> tuple[str, str]:
         return "POST", f"/api/v1/jobs/{record.payload['job_id']}/score"
     if record.kind == "PREPARE":
         return "POST", f"/api/v1/jobs/{record.payload['job_id']}/prepare"
+    if record.kind == "TRANSITION":
+        return "POST", f"/api/v1/applications/{record.payload['application_id']}/transition"
     raise ValueError(f"Tipo de sincronização desconhecido: {record.kind}")
 
 
 def _body_for(record: CoreSyncRecord) -> dict | None:
-    """SCORE e PREPARE não têm corpo no Core - job_id em payload só existe
-    pra montar o caminho da rota (ver _endpoint_for). Só JOB manda corpo."""
+    """SCORE e PREPARE não têm corpo no Core - job_id/application_id em
+    payload só existem pra montar o caminho da rota (ver _endpoint_for).
+    JOB manda o corpo completo; TRANSITION manda só status/reason (o
+    Core aceita actor/automation_mode como opcionais com default)."""
     if record.kind == "JOB":
         return record.payload
+    if record.kind == "TRANSITION":
+        return {"status": record.payload["status"], "reason": record.payload.get("reason", "")}
     return None
 
 

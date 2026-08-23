@@ -1,3 +1,4 @@
+import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,9 +9,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.core_bridge import (  # noqa: E402
     CoreSyncRecord, backoff_seconds, build_job_record, build_prepare_record,
-    build_score_record, guess_company, guess_company_from_linkedin_url,
-    is_due, is_eligible_for_prepare, job_idempotency_key,
-    looks_like_job_board_boilerplate, send_core_sync,
+    build_score_record, build_transition_record, guess_company,
+    guess_company_from_linkedin_url, is_due, is_eligible_for_prepare,
+    job_idempotency_key, looks_like_job_board_boilerplate,
+    map_local_status_to_core_transition, send_core_sync,
 )
 
 
@@ -114,6 +116,73 @@ def test_is_eligible_for_prepare_matches_the_cores_own_gate() -> None:
     assert is_eligible_for_prepare(90, "BLOCK") is False
     assert is_eligible_for_prepare(90, "DISCARD") is False
     assert is_eligible_for_prepare(65, "REVIEW") is False
+
+
+def test_map_local_status_covers_the_real_apply_time_outcomes() -> None:
+    assert map_local_status_to_core_transition("READY_FOR_REVIEW") == "READY"
+    assert map_local_status_to_core_transition("APPLIED") == "CONFIRMED"
+    assert map_local_status_to_core_transition("MANUAL_REQUIRED") == "MANUAL_REQUIRED"
+
+
+def test_map_local_status_folds_block_and_closed_into_error_not_a_new_core_state() -> None:
+    # BLOCKED/CLOSED não têm alvo direto a partir de PREPARING no schema
+    # real do Core (ALLOWED_TRANSITIONS) - mapear pra um estado novo
+    # exigiria migration, fora do escopo desta ponte. ERROR é o alvo
+    # honesto disponível, com o motivo real preservado em reason.
+    assert map_local_status_to_core_transition("BLOCKED") == "ERROR"
+    assert map_local_status_to_core_transition("CLOSED") == "ERROR"
+    assert map_local_status_to_core_transition("FAILED") == "ERROR"
+
+
+def test_map_local_status_returns_none_for_pre_application_statuses() -> None:
+    assert map_local_status_to_core_transition("INSPECTING") is None
+    assert map_local_status_to_core_transition("ANALYZED") is None
+    assert map_local_status_to_core_transition("READY_TO_PREPARE") is None
+
+
+def test_build_transition_record_idempotency_key_is_stable_per_application_and_target() -> None:
+    record = build_transition_record(core_application_id="app-1", target_status="READY",
+                                      reason="Formulário pronto.", correlation_id="local-1")
+    assert record.kind == "TRANSITION"
+    assert record.idempotency_key == "transition:app-1:READY"
+    assert record.payload == {"application_id": "app-1", "status": "READY", "reason": "Formulário pronto."}
+
+
+def test_send_core_sync_transition_body_only_has_status_and_reason() -> None:
+    record = build_transition_record(core_application_id="app-1", target_status="MANUAL_REQUIRED",
+                                      reason="CAPTCHA detectado.", correlation_id="local-1")
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"from": "PREPARING", "to": "MANUAL_REQUIRED"}'
+
+    def fake_urlopen(request, timeout=20):
+        captured["data"] = json.loads(request.data.decode())
+        captured["path"] = request.full_url
+        return FakeResponse()
+
+    with patch("src.core_bridge.urlopen", side_effect=fake_urlopen):
+        result = send_core_sync("http://api:8000", "token", record)
+    assert result.ok is True
+    assert captured["path"] == "http://api:8000/api/v1/applications/app-1/transition"
+    assert captured["data"] == {"status": "MANUAL_REQUIRED", "reason": "CAPTCHA detectado."}
+
+
+def test_send_core_sync_transition_409_means_already_applied_not_an_error() -> None:
+    record = build_transition_record(core_application_id="app-1", target_status="READY",
+                                      reason="", correlation_id="local-1")
+    error = HTTPError("http://api:8000/api/v1/applications/app-1/transition", 409, "Conflict", hdrs=None, fp=None)  # type: ignore[arg-type]
+    with patch("src.core_bridge.urlopen", side_effect=error):
+        result = send_core_sync("http://api:8000", "token", record)
+    assert result.ok is True
+    assert result.response == {"already_applied": True}
 
 
 def test_job_idempotency_key_matches_job_sources_unique_constraint_granularity() -> None:
