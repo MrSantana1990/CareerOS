@@ -46,3 +46,20 @@ def test_unresolved_external_apply_is_retryable_bounded_by_the_attempts_cap() ->
     attempts_cap_index = body.index("if attempts >= 3:")
     new_condition_index = body.index('"candidatura é externa a esta plataforma"')
     assert attempts_cap_index < new_condition_index
+
+
+def test_any_failed_status_is_retryable_bounded_by_the_attempts_cap() -> None:
+    # Achado real: uma candidatura FAILED com motivo genérico ("Falha na
+    # preparação: Error.") não era retryable, mesmo depois de instrumentar
+    # a exceção real pra diagnóstico (application["prepare_error"]) - sem
+    # isso, corrigir a causa raiz e tentar de novo exigiria contornar o
+    # cap manualmente. A condição antiga só cobria "TimeoutError"; qualquer
+    # FAILED agora é elegível, sempre bounded pelo cap attempts >= 3.
+    source = _source()
+    start = source.index("def retryable(application: dict) -> bool:")
+    end = source.index("\n    pending = sorted(")
+    body = source[start:end]
+    assert 'if application.get("status") == "FAILED":' in body
+    attempts_cap_index = body.index("if attempts >= 3:")
+    failed_condition_index = body.index('if application.get("status") == "FAILED":')
+    assert attempts_cap_index < failed_condition_index
