@@ -1466,24 +1466,84 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
             elif can_submit and would_apply and not live_allowed:
                 event("DRY_RUN_SUBMISSION_BLOCKED", application_id=application["id"])
             if can_submit and live_allowed:
-                before_submit = page.url
-                await visible_submit.click(timeout=8000)
-                await page.wait_for_timeout(2200)
-                if await submission_confirmed(page, before_submit):
-                    application["status"] = "APPLIED"
-                    application["submitted_at"] = datetime.now(UTC).isoformat()
-                    application["reason"] = "Envio confirmado pela plataforma."
-                    submitted += 1
-                    remaining_quota -= 1
-                    event("APPLICATION_SUBMITTED", application_id=application["id"])
-                else:
+                # O texto e até a tag do elemento não bastam pra saber se um clique
+                # é um envio de formulário ou um redirecionamento externo - SPAs
+                # modernas (ex: LinkedIn) costumam usar <button onClick> disparando
+                # window.open()/navegação via JS, não um <a href> simples (achado
+                # real: a checagem estática por tag/href não pegou esse caso).
+                # Decide observando o que o clique realmente faz: nova aba ou
+                # mudança de domínio nunca é um envio - é candidatura externa, um
+                # fluxo legítimo a seguir, não motivo pra desistir. Só chama
+                # submission_confirmed() quando o clique manteve a mesma origem.
+                live_click_attempts = 0
+                resolved = False
+                while visible_submit is not None and live_click_attempts < MAX_APPLICATION_STEPS:
+                    live_click_attempts += 1
+                    before_submit = page.url
+                    before_pages = set(browser.pages)
+                    try:
+                        await visible_submit.click(timeout=8000)
+                    except Exception:
+                        break
+                    await page.wait_for_timeout(2200)
+                    opened_pages = [candidate for candidate in browser.pages if candidate not in before_pages]
+                    navigated_cross_origin = urlparse(page.url).netloc != urlparse(before_submit).netloc
+                    if opened_pages or navigated_cross_origin:
+                        if opened_pages:
+                            page = opened_pages[-1]
+                            try:
+                                await page.wait_for_load_state("domcontentloaded", timeout=35_000)
+                            except Exception:
+                                pass
+                        await dismiss_overlays(page)
+                        hop = {
+                            "at": datetime.now(UTC).isoformat(), "from_url": before_submit,
+                            "followed_to_url": page.url, "target_domain": urlparse(page.url).netloc,
+                        }
+                        external_apply_hops.append(hop)
+                        event("EXTERNAL_APPLY_LINK_FOLLOWED", application_id=application["id"],
+                              target_domain=hop["target_domain"])
+                        await fill_current_step()
+                        visible_submit = None
+                        for root in await search_roots(page):
+                            visible_submit = await find_first_visible(root, FINAL_SUBMIT_CTA_PATTERN)
+                            if visible_submit is not None:
+                                break
+                        continue
+                    resolved = True
+                    if await submission_confirmed(page, before_submit):
+                        application["status"] = "APPLIED"
+                        application["submitted_at"] = datetime.now(UTC).isoformat()
+                        application["reason"] = "Envio confirmado pela plataforma."
+                        submitted += 1
+                        remaining_quota -= 1
+                        event("APPLICATION_SUBMITTED", application_id=application["id"])
+                    else:
+                        application["status"] = "MANUAL_REQUIRED"
+                        application["reason"] = "Envio acionado, mas sem confirmação da plataforma; não contabilizada."
+                        remember_layout(application, "submission_unconfirmed")
+                        await report_intervention(
+                            application, "SUBMISSION_UNCONFIRMED", "Confirme o envio da candidatura",
+                            "A plataforma não confirmou o envio. Verifique a página antes de tentar novamente.",
+                            page.url,
+                        )
+                    break
+                if external_apply_hops:
+                    application["external_apply_hops"] = external_apply_hops
+                if not resolved:
                     application["status"] = "MANUAL_REQUIRED"
-                    application["reason"] = "Envio acionado, mas sem confirmação da plataforma; não contabilizada."
-                    remember_layout(application, "submission_unconfirmed")
+                    application["reason"] = (
+                        "A candidatura é externa a esta plataforma (link/redirecionamento) e não foi "
+                        "possível localizar um envio interno de verdade após seguir a navegação - "
+                        "conclua manualmente no site de destino."
+                    )
+                    remember_layout(application, "external_apply_unresolved", {"hops": external_apply_hops})
                     await report_intervention(
-                        application, "SUBMISSION_UNCONFIRMED", "Confirme o envio da candidatura",
-                        "A plataforma não confirmou o envio. Verifique a página antes de tentar novamente.",
-                        page.url,
+                        application, "SUBMISSION_UNCONFIRMED", "Complete a candidatura externa manualmente",
+                        "O sistema seguiu um ou mais links de candidatura externa mas não encontrou um "
+                        "formulário interno pra completar o envio automaticamente. Finalize a candidatura "
+                        "manualmente no site da empresa.",
+                        page.url, {"external_apply_hops": external_apply_hops},
                     )
             else:
                 application["status"] = "READY_FOR_REVIEW"
