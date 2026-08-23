@@ -56,17 +56,17 @@ def test_core_sync_chain_advances_job_to_score_to_prepare() -> None:
     end = source.index("\nasync def core_sync_scheduler(")
     body = source[start:end]
     assert 'if record.kind == "JOB":' in body
-    assert "build_score_record(job_id=job_id, correlation_id=record.correlation_id)" in body
-    assert 'elif record.kind == "SCORE":' in body
+    assert "return [build_score_record(job_id=job_id, correlation_id=record.correlation_id)]" in body
+    assert 'if record.kind == "SCORE":' in body
     assert "if is_eligible_for_prepare(total, recommendation):" in body
-    assert "build_prepare_record(job_id=job_id, correlation_id=record.correlation_id)" in body
-    assert 'elif record.kind == "PREPARE":' in body
+    assert "return [build_prepare_record(job_id=job_id, correlation_id=record.correlation_id)]" in body
+    assert 'if record.kind == "PREPARE":' in body
 
 
 def test_core_sync_chain_never_advances_on_a_transition_already_applied_response() -> None:
     source = _source()
     start = source.index("def _advance_core_sync_chain(")
-    body = source[start : start + 400]
+    body = source[start : start + 1200]
     assert 'if response is None or response.get("already_applied"):' in body
 
 
@@ -75,7 +75,23 @@ def test_core_sync_scheduler_advances_the_chain_only_on_success() -> None:
     start = source.index("async def core_sync_scheduler(")
     end = source.index("\nasync def google_mail_scheduler(")
     body = source[start:end]
-    assert "_advance_core_sync_chain(record, result.response)" in body
+    assert "remaining.extend(_advance_core_sync_chain(record, result.response))" in body
+
+
+def test_advance_core_sync_chain_never_writes_the_outbox_directly() -> None:
+    # Bug real encontrado em produção: enqueue_core_sync() dentro de
+    # _advance_core_sync_chain acrescentava um registro novo no outbox,
+    # mas _rewrite_core_sync_outbox(remaining) - chamado no fim do MESMO
+    # ciclo do scheduler - sobrescrevia o arquivo inteiro só com a lista
+    # em memória, apagando o que acabara de ser acrescentado. A cadeia
+    # nunca avançava além de JOB. Corrigido: a função só retorna os
+    # registros novos, quem escreve é sempre o scheduler.
+    source = _source()
+    start = source.index("def _advance_core_sync_chain(")
+    end = source.index("\nasync def core_sync_scheduler(")
+    body = source[start:end]
+    assert "enqueue_core_sync(" not in body
+    assert "-> list[CoreSyncRecord]:" in body
 
 
 def test_resolve_resume_never_blocks_when_core_has_no_link_yet() -> None:

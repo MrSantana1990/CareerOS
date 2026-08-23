@@ -1476,29 +1476,37 @@ def _update_core_sync_link(correlation_id: str, **fields: object) -> None:
     save_json(CORE_SYNC_LINKS, links)
 
 
-def _advance_core_sync_chain(record: CoreSyncRecord, response: dict | None) -> None:
+def _advance_core_sync_chain(record: CoreSyncRecord, response: dict | None) -> list[CoreSyncRecord]:
     """JOB sincronizado -> pontua; pontuação elegível -> prepara (Resume
     Router de verdade). Cada etapa só avança se a anterior teve sucesso -
-    nunca pula direto pra prepare sem o job_id/score reais do Core."""
+    nunca pula direto pra prepare sem o job_id/score reais do Core.
+
+    Retorna os registros novos em vez de enfileirar direto (enqueue_core_sync
+    só acrescenta ao outbox): core_sync_scheduler chama isso DENTRO do
+    laço que depois reescreve o arquivo inteiro a partir da lista
+    `remaining` em memória - um enqueue direto aqui seria apagado pela
+    reescrita no fim do mesmo ciclo (bug real encontrado e corrigido:
+    a cadeia nunca avançava além de JOB porque o SCORE enfileirado assim
+    sumia antes de ser lido de novo)."""
     if response is None or response.get("already_applied"):
-        return
+        return []
     if record.kind == "JOB":
         job_id = response.get("id")
         if not job_id:
-            return
+            return []
         _update_core_sync_link(record.correlation_id, job_id=job_id)
-        enqueue_core_sync(build_score_record(job_id=job_id, correlation_id=record.correlation_id))
-    elif record.kind == "SCORE":
+        return [build_score_record(job_id=job_id, correlation_id=record.correlation_id)]
+    if record.kind == "SCORE":
         job_id = record.payload.get("job_id")
         total = int(response.get("total", 0) or 0)
         recommendation = str(response.get("recommendation", ""))
         _update_core_sync_link(record.correlation_id, last_score=total, last_recommendation=recommendation)
         if is_eligible_for_prepare(total, recommendation):
-            enqueue_core_sync(build_prepare_record(job_id=job_id, correlation_id=record.correlation_id))
-        else:
-            event("CORE_SYNC_NOT_ELIGIBLE", correlation_id=record.correlation_id,
-                  total=total, recommendation=recommendation)
-    elif record.kind == "PREPARE":
+            return [build_prepare_record(job_id=job_id, correlation_id=record.correlation_id)]
+        event("CORE_SYNC_NOT_ELIGIBLE", correlation_id=record.correlation_id,
+              total=total, recommendation=recommendation)
+        return []
+    if record.kind == "PREPARE":
         application = response.get("application") or {}
         _update_core_sync_link(
             record.correlation_id,
@@ -1508,6 +1516,8 @@ def _advance_core_sync_chain(record: CoreSyncRecord, response: dict | None) -> N
         )
         event("CORE_APPLICATION_PREPARED", correlation_id=record.correlation_id,
               core_application_id=application.get("id"), resume_version_id=application.get("resume_version_id"))
+        return []
+    return []
 
 
 async def core_sync_scheduler() -> None:
@@ -1525,7 +1535,7 @@ async def core_sync_scheduler() -> None:
                 if result.ok:
                     event("CORE_SYNC_OK", kind=record.kind, correlation_id=record.correlation_id,
                           idempotency_key=record.idempotency_key, attempts=record.attempts + 1)
-                    _advance_core_sync_chain(record, result.response)
+                    remaining.extend(_advance_core_sync_chain(record, result.response))
                     continue
                 record.attempts += 1
                 record.last_error = result.error
