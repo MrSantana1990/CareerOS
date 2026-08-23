@@ -1046,7 +1046,7 @@ async def required_unknown_fields(root: Page | Frame) -> list[str]:
 
 async def dismiss_overlays(page: Page) -> list[str]:
     dismissed: list[str] = []
-    pattern = re.compile(r"ok,? entendi|entendi|continuar sem|agora não", re.IGNORECASE)
+    pattern = re.compile(r"ok,? entendi|entendi|continuar sem|agora não|^aceitar$|disagree and close", re.IGNORECASE)
     for role in ("button", "link"):
         locator = page.get_by_role(role, name=pattern)
         for index in range(min(await locator.count(), 5)):
