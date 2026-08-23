@@ -46,7 +46,7 @@ def test_job_sync_never_fabricates_a_company_name() -> None:
 def test_inspect_application_queue_syncs_after_visiting_the_real_page() -> None:
     source = _source()
     start = source.index("async def inspect_application_queue(")
-    body = source[start : start + 2500]
+    body = source[start : start + 3000]
     assert 'body = (await page.locator("body").inner_text(timeout=10_000))[:80_000]' in body
     assert "await sync_job_to_core(page, job, application, body)" in body
 
