@@ -55,16 +55,22 @@ class CoreSyncRecord:
         return cls(**{key: value for key, value in data.items() if key in known})
 
 
-# Achado ao vivo (primeira validação em produção, 23/08/2026): o título de
-# página do InfoJobs não contém empresa nenhuma - é so o próprio texto
-# padrão do agregador ("Vaga de emprego de X em Y"), o que gerava um nome
-# de empresa fabricado por engano. O LinkedIn tem um sinal muito mais forte
-# na própria URL (".../.-at-<empresa>-<id>").
+# Achados ao vivo (primeira validação em produção, 23/08/2026):
+# - InfoJobs: o título da página é o próprio texto padrão do agregador
+#   ("Vaga de emprego de X em Y"), sem empresa nenhuma.
+# - Catho: o título é ESTATICO E GENERICO pra qualquer vaga ("Vagas de
+#   emprego em todo Brasil | Catho") - não carrega nem o cargo, quanto
+#   mais a empresa. Titulo de pagina nao serve de sinal nenhum aqui.
+# O LinkedIn tem um sinal muito mais forte na própria URL
+# (".../-at-<empresa>-<id>").
 _LINKEDIN_COMPANY_URL_PATTERN = re.compile(r"-at-([a-z0-9-]+?)-\d+(?:[/?]|$)", re.IGNORECASE)
 _JOB_BOARD_BOILERPLATE = re.compile(
     r"vaga de emprego|processo seletivo|oportunidade de emprego|^vaga\b|empregos? em\b",
     re.IGNORECASE,
 )
+# Nomes da própria plataforma nunca são o nome da empresa que contratou -
+# aparecem no título como sufixo/marca do site, não como sinal de empresa.
+_KNOWN_JOB_PLATFORMS = {"catho", "infojobs", "linkedin", "indeed", "vagas", "empregos"}
 
 
 def guess_company_from_linkedin_url(source_url: str) -> str:
@@ -91,7 +97,8 @@ def guess_company(*, source: str, source_url: str, page_title: str) -> str:
         if from_url:
             return from_url
     parts = [part.strip() for part in re.split(r"\s[-|–]\s", page_title) if part.strip()]
-    candidate = parts[-1] if parts else ""
+    candidates = [part for part in parts if part.lower() not in _KNOWN_JOB_PLATFORMS]
+    candidate = candidates[-1] if candidates else ""
     if not candidate or looks_like_job_board_boilerplate(candidate):
         return ""
     return candidate
