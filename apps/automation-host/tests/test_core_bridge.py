@@ -46,6 +46,17 @@ def test_guess_company_falls_back_to_page_title_when_no_separator_present() -> N
     assert company == "Acme Ltda"
 
 
+def test_guess_company_rejects_catho_generic_static_title() -> None:
+    # Achado real em produção: o título do Catho é fixo pra qualquer vaga
+    # ("Vagas de emprego em todo Brasil | Catho") - nem cargo nem empresa,
+    # e sem o filtro de nome de plataforma o "Catho" do fim virava empresa.
+    company = guess_company(
+        source="Catho", source_url="https://www.catho.com.br/vagas/x/123",
+        page_title="Vagas de emprego em todo Brasil | Catho",
+    )
+    assert company == ""
+
+
 def test_guess_company_rejects_job_board_boilerplate_instead_of_fabricating() -> None:
     company = guess_company(
         source="InfoJobs", source_url="https://www.infojobs.com.br/vaga-de-x__123.aspx",
