@@ -7,7 +7,8 @@ def _source() -> str:
 
 def test_main_imports_core_bridge_helpers() -> None:
     source = _source()
-    assert "from .core_bridge import CoreSyncRecord, build_job_record, guess_company, is_due, send_core_sync" in source
+    assert "from .core_bridge import (CoreSyncRecord, build_job_record, build_prepare_record," in source
+    assert "build_score_record, guess_company, is_due, is_eligible_for_prepare," in source
 
 
 def test_core_sync_scheduler_treats_dead_letter_as_a_hard_stop_not_infinite_retry() -> None:
@@ -47,3 +48,51 @@ def test_inspect_application_queue_syncs_after_visiting_the_real_page() -> None:
     body = source[start : start + 2500]
     assert 'body = (await page.locator("body").inner_text(timeout=10_000))[:80_000]' in body
     assert "await sync_job_to_core(page, job, application, body)" in body
+
+
+def test_core_sync_chain_advances_job_to_score_to_prepare() -> None:
+    source = _source()
+    start = source.index("def _advance_core_sync_chain(")
+    end = source.index("\nasync def core_sync_scheduler(")
+    body = source[start:end]
+    assert 'if record.kind == "JOB":' in body
+    assert "build_score_record(job_id=job_id, correlation_id=record.correlation_id)" in body
+    assert 'elif record.kind == "SCORE":' in body
+    assert "if is_eligible_for_prepare(total, recommendation):" in body
+    assert "build_prepare_record(job_id=job_id, correlation_id=record.correlation_id)" in body
+    assert 'elif record.kind == "PREPARE":' in body
+
+
+def test_core_sync_chain_never_advances_on_a_transition_already_applied_response() -> None:
+    source = _source()
+    start = source.index("def _advance_core_sync_chain(")
+    body = source[start : start + 400]
+    assert 'if response is None or response.get("already_applied"):' in body
+
+
+def test_core_sync_scheduler_advances_the_chain_only_on_success() -> None:
+    source = _source()
+    start = source.index("async def core_sync_scheduler(")
+    end = source.index("\nasync def google_mail_scheduler(")
+    body = source[start:end]
+    assert "_advance_core_sync_chain(record, result.response)" in body
+
+
+def test_resolve_resume_never_blocks_when_core_has_no_link_yet() -> None:
+    source = _source()
+    start = source.index("async def resolve_resume_for_application(")
+    body = source[start : start + 900]
+    assert 'if not version_id:' in body
+    assert 'return "", None' in body
+
+
+def test_execute_application_queue_uses_the_core_selected_resume_when_available() -> None:
+    source = _source()
+    start = source.index("async def resolve_resume_for_application(")
+    end = source.index("\nasync def sync_job_to_core(")
+    section = source[start:end]
+    assert 'CAREER_API_URL + f"/api/v1/resumes/{version_id}/file"' in section
+    start = source.index("resume_override_path, core_resume_version_id = await resolve_resume_for_application(application)")
+    body = source[start : start + 600]
+    assert 'profile.model_copy(update={"resume_path": resume_override_path})' in body
+    assert "filled.extend(await fill_known_fields(root, effective_profile))" in source

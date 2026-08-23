@@ -7,7 +7,7 @@ import json
 import os
 import urllib.request
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -743,6 +743,31 @@ async def upload_resume(
         await session.commit()
     return {"resume_path": str(target), "resume_name": file.filename or target.name,
             "family": family, "language": language}
+
+
+@router.get("/resumes/{version_id}/file")
+async def download_resume_file(version_id: UUID, slug: str = Depends(require_admin)) -> Response:
+    """Devolve os bytes do currículo aprovado que o Resume Router
+    escolheu (resume_version_id retornado por POST /jobs/{id}/prepare) -
+    necessário porque quem prepara a candidatura (Core) e quem preenche o
+    formulário de verdade (automation-host) são serviços/volumes
+    separados; sem isso não há como o Resume Router influenciar uma
+    candidatura real."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        row = (await session.execute(text("""
+            SELECT rv.storage_key, r.name AS resume_name
+            FROM resume_versions rv JOIN resumes r ON r.id = rv.resume_id
+            WHERE rv.id = :version_id AND rv.organization_id = :organization_id
+        """), {"version_id": version_id, "organization_id": org_id})).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Versão de currículo não encontrada.")
+    storage_path = Path(row["storage_key"])
+    if not storage_path.exists():
+        raise HTTPException(status_code=404, detail="Arquivo do currículo não encontrado no armazenamento.")
+    filename = row["resume_name"] or storage_path.name
+    return Response(content=storage_path.read_bytes(), media_type="application/octet-stream",
+                     headers={"X-Resume-Filename": filename})
 
 
 @router.get("/career-rules")
