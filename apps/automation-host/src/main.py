@@ -1117,6 +1117,63 @@ async def click_first_visible(page: Page, pattern: str) -> bool:
     return False
 
 
+async def classify_application_cta(item, current_page_url: str) -> str:
+    """INTERNAL_APPLY (formulário/candidatura executável na página atual)
+    ou EXTERNAL_APPLY (redirecionamento pra outro domínio - ATS/site da
+    empresa). O texto do botão nunca revela isso sozinho: "Candidatar-se"
+    é usado tanto pra abrir um link externo (ex: LinkedIn) quanto pra
+    enviar um formulário interno já preenchido (ex: SevenSys/Abler) -
+    achado real em produção que confundia os dois."""
+    try:
+        tag_name = await item.evaluate("el => el.tagName.toLowerCase()")
+    except Exception:
+        return "INTERNAL_APPLY"
+    if tag_name != "a":
+        return "INTERNAL_APPLY"
+    try:
+        href = await item.get_attribute("href")
+    except Exception:
+        href = None
+    if not href:
+        return "INTERNAL_APPLY"
+    target = urljoin(current_page_url, href)
+    if urlparse(target).netloc and urlparse(target).netloc != urlparse(current_page_url).netloc:
+        return "EXTERNAL_APPLY"
+    return "INTERNAL_APPLY"
+
+
+async def follow_external_apply(page: Page, browser: BrowserContext, item) -> Page:
+    """Segue um CTA classificado como EXTERNAL_APPLY - clica e acompanha
+    a navegação real (nova aba ou goto via href), nunca trata o clique
+    em si como um envio de formulário. Candidatura externa é um fluxo
+    legítimo a seguir, não um motivo pra desistir."""
+    pages_before = set(browser.pages)
+    href = None
+    try:
+        href = await item.get_attribute("href")
+    except Exception:
+        pass
+    try:
+        await item.click(timeout=8000)
+    except Exception:
+        return page
+    await page.wait_for_timeout(1800)
+    opened_pages = [candidate for candidate in browser.pages if candidate not in pages_before]
+    if opened_pages:
+        page = opened_pages[-1]
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=35_000)
+        except Exception:
+            pass
+    elif href:
+        try:
+            await page.goto(urljoin(page.url, href), wait_until="domcontentloaded", timeout=35_000)
+        except Exception:
+            pass
+    await dismiss_overlays(page)
+    return page
+
+
 def remember_layout(application: dict, stage: str, details: dict | None = None) -> None:
     knowledge = load_json(LAYOUT_KNOWLEDGE, {})
     host = urlparse(str(application.get("job_url", ""))).netloc.lower() or "unknown"
@@ -1318,13 +1375,42 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
 
             visible_submit = None
             steps_advanced = 0
+            external_apply_hops: list[dict[str, str]] = []
             unknown = await fill_current_step()
             while not unknown and visible_submit is None and steps_advanced < MAX_APPLICATION_STEPS:
+                candidate = None
                 for root in await search_roots(page):
-                    visible_submit = await find_first_visible(root, FINAL_SUBMIT_CTA_PATTERN)
-                    if visible_submit is not None:
+                    candidate = await find_first_visible(root, FINAL_SUBMIT_CTA_PATTERN)
+                    if candidate is not None:
                         break
-                if visible_submit is not None:
+                if candidate is not None:
+                    # Achado real em produção: um <a href> apontando pra outro domínio
+                    # NUNCA é um envio de formulário, mesmo batendo no padrão de texto
+                    # final ("Candidatar-se" é usado tanto pra isso quanto pra abrir
+                    # link externo). Candidatura externa é um fluxo legítimo a seguir,
+                    # não um motivo pra desistir - segue a navegação e continua
+                    # procurando o envio de verdade na página de destino, em vez de
+                    # clicar no link como se fosse SUBMIT_ACTION.
+                    if await classify_application_cta(candidate, page.url) == "EXTERNAL_APPLY":
+                        href = None
+                        try:
+                            href = await candidate.get_attribute("href")
+                        except Exception:
+                            pass
+                        hop = {
+                            "at": datetime.now(UTC).isoformat(),
+                            "from_url": page.url,
+                            "target_domain": urlparse(urljoin(page.url, href or "")).netloc,
+                        }
+                        event("EXTERNAL_APPLY_LINK_FOLLOWED", application_id=application["id"],
+                              target_domain=hop["target_domain"])
+                        page = await follow_external_apply(page, browser, candidate)
+                        hop["followed_to_url"] = page.url
+                        external_apply_hops.append(hop)
+                        steps_advanced += 1
+                        unknown = await fill_current_step()
+                        continue
+                    visible_submit = candidate
                     break
                 if not await click_first_visible(page, NEXT_STEP_CTA_PATTERN):
                     break
@@ -1332,6 +1418,8 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 await page.wait_for_timeout(1500)
                 await dismiss_overlays(page)
                 unknown = await fill_current_step()
+            if external_apply_hops:
+                application["external_apply_hops"] = external_apply_hops
 
             SCREENSHOTS.mkdir(parents=True, exist_ok=True)
             evidence = SCREENSHOTS / f"{application['id']}-prepared.png"

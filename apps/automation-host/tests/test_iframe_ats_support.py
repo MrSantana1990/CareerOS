@@ -22,8 +22,10 @@ def test_cta_and_submit_lookup_use_search_roots() -> None:
     assert "for root in await search_roots(page):" in source
     assert source.count("root.get_by_role(") >= 3
     # botão final de envio também percorre as raízes antes de decidir can_submit,
-    # via find_first_visible (mesma busca robusta usada pelo CTA inicial).
-    assert "visible_submit = await find_first_visible(root, FINAL_SUBMIT_CTA_PATTERN)" in source
+    # via find_first_visible (mesma busca robusta usada pelo CTA inicial) - o
+    # resultado é classificado (INTERNAL_APPLY x EXTERNAL_APPLY) antes de virar
+    # visible_submit, então a variável em si chama-se "candidate" nesse ponto.
+    assert "candidate = await find_first_visible(root, FINAL_SUBMIT_CTA_PATTERN)" in source
 
 
 def test_form_filling_functions_operate_on_a_root_not_just_the_top_page() -> None:
