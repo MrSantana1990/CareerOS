@@ -47,6 +47,8 @@ AI_DECISIONS = RUNTIME / "ai-decisions.jsonl"
 GOOGLE_TOKEN = RUNTIME / "google" / "google-token.json"
 GOOGLE_INBOX = RUNTIME / "google" / "career-mail.json"
 GOOGLE_STATUS_CACHE = RUNTIME / "google" / "connection-status.json"
+GOOGLE_HEALTH = RUNTIME / "google" / "health.json"
+GOOGLE_HEALTH_ALERT_THRESHOLD = 3
 LOCAL_AI_URL = os.getenv("LOCAL_AI_URL", "http://127.0.0.1:8080/v1")
 RESUME_STORAGE = Path(os.getenv("RESUME_STORAGE_DIR", "/data/resumes")).resolve()
 CAREER_API_URL = os.getenv("CAREER_API_URL", "http://api:8000").rstrip("/")
@@ -1341,11 +1343,28 @@ async def google_mail_scheduler() -> None:
     await asyncio.sleep(20)
     while True:
         if GOOGLE_TOKEN.exists():
+            health = load_json(GOOGLE_HEALTH, {"consecutive_failures": 0, "last_success_at": None})
             try:
                 result = await asyncio.to_thread(scan_recruitment_mail, GOOGLE_TOKEN, GOOGLE_INBOX, 90, 250)
                 event("GOOGLE_MAIL_SCANNED", scanned=result["scanned"], discovered=result["discovered"])
+                if health.get("consecutive_failures", 0) >= GOOGLE_HEALTH_ALERT_THRESHOLD:
+                    event("GOOGLE_MAIL_RECOVERED", after_failures=health["consecutive_failures"])
+                save_json(GOOGLE_HEALTH, {
+                    "consecutive_failures": 0,
+                    "last_success_at": datetime.now(UTC).isoformat(),
+                    "last_error": None,
+                })
             except Exception as exc:
-                event("GOOGLE_MAIL_SCAN_FAILED", error=type(exc).__name__)
+                consecutive_failures = health.get("consecutive_failures", 0) + 1
+                save_json(GOOGLE_HEALTH, {
+                    "consecutive_failures": consecutive_failures,
+                    "last_success_at": health.get("last_success_at"),
+                    "last_error": type(exc).__name__,
+                    "last_error_at": datetime.now(UTC).isoformat(),
+                })
+                event("GOOGLE_MAIL_SCAN_FAILED", error=type(exc).__name__, consecutive_failures=consecutive_failures)
+                if consecutive_failures == GOOGLE_HEALTH_ALERT_THRESHOLD:
+                    event("GOOGLE_MAIL_AUTH_BROKEN", error=type(exc).__name__, consecutive_failures=consecutive_failures)
         await asyncio.sleep(600)
 
 
@@ -1386,6 +1405,7 @@ async def get_metrics() -> dict[str, object]:
     for application in applications:
         status = str(application.get("status") or "UNKNOWN")
         statuses[status] = statuses.get(status, 0) + 1
+    google_health = load_json(GOOGLE_HEALTH, {})
     return {
         "service_online": True,
         "executor_mode": "vps" if BROWSER_HEADLESS else "local",
@@ -1398,6 +1418,9 @@ async def get_metrics() -> dict[str, object]:
         "sources": sources,
         "events": event_count,
         "updated_at": state.get("updated_at"),
+        "google_mail_healthy": google_health.get("consecutive_failures", 0) < GOOGLE_HEALTH_ALERT_THRESHOLD,
+        "google_mail_consecutive_failures": google_health.get("consecutive_failures", 0),
+        "google_mail_last_success_at": google_health.get("last_success_at"),
     }
 
 
@@ -1430,12 +1453,19 @@ async def google_status() -> dict:
         status["last_items"] = items[:20]
         return status
     except Exception as exc:
-        if cached.get("connected"):
-            cached["alerts"] = len([item for item in items if item.get("status") == "NEW"])
-            cached["last_items"] = items[:20]
-            cached["warning"] = type(exc).__name__
-            return cached
-        return {"connected": False, "email": None, "calendar": False, "alerts": 0, "last_items": items[:20], "error": type(exc).__name__}
+        # A checagem ao vivo falhou agora - nunca reportar connected=true com base em
+        # cache antigo, mesmo que a última checagem bem-sucedida tenha sido recente.
+        health = load_json(GOOGLE_HEALTH, {})
+        return {
+            "connected": False,
+            "email": cached.get("email"),
+            "calendar": False,
+            "error": type(exc).__name__,
+            "last_success_at": health.get("last_success_at") or cached.get("checked_at"),
+            "consecutive_failures": health.get("consecutive_failures", 0),
+            "alerts": len([item for item in items if item.get("status") == "NEW"]),
+            "last_items": items[:20],
+        }
 
 
 @app.post("/google/scan")
