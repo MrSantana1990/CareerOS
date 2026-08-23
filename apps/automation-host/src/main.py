@@ -1226,7 +1226,7 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
         attempts = int(application.get("attempts", 0))
         if attempts >= 3:
             return False
-        if application.get("status") == "FAILED" and "TimeoutError" in application.get("reason", ""):
+        if application.get("status") == "FAILED":
             return True
         if application.get("status") == "READY_FOR_REVIEW" and "botão final não localizado" in application.get("reason", ""):
             return True
