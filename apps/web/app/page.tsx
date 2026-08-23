@@ -152,6 +152,10 @@ type PortalDashboard = {
     jobs: number;
     applications: number;
     pending_decisions: number;
+    responses: number;
+    interviews: number;
+    technical_steps: number;
+    offers: number;
   };
   rules: CareerRule[];
   decisions: Decision[];
@@ -854,10 +858,10 @@ export default function Home() {
                       "Aplicadas",
                       dashboard?.workspace.applications ?? appliedCount,
                     ],
-                    ["Respostas", 0],
-                    ["Entrevistas", 0],
-                    ["Técnicas", 0],
-                    ["Propostas", 0],
+                    ["Respostas", dashboard?.workspace.responses ?? 0],
+                    ["Entrevistas", dashboard?.workspace.interviews ?? 0],
+                    ["Técnicas", dashboard?.workspace.technical_steps ?? 0],
+                    ["Propostas", dashboard?.workspace.offers ?? 0],
                   ].map(([label, value]) => (
                     <div key={label}>
                       <span>{label}</span>

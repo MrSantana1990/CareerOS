@@ -118,7 +118,16 @@ async def workspace(organization_slug: str = Depends(require_admin)) -> dict[str
                (SELECT count(*) FROM jobs j WHERE j.organization_id = o.id) AS jobs,
                (SELECT count(*) FROM applications a WHERE a.organization_id = o.id) AS applications,
                (SELECT count(*) FROM decision_inbox d
-                WHERE d.organization_id = o.id AND d.status = 'PENDING') AS pending_decisions
+                WHERE d.organization_id = o.id AND d.status = 'PENDING') AS pending_decisions,
+               (SELECT count(*) FROM recruitment_communications rc
+                WHERE rc.organization_id = o.id
+                  AND rc.category IN ('INTERVIEW','PROPOSAL','REJECTION','APPLICATION_CONFIRMED')) AS responses,
+               (SELECT count(*) FROM recruitment_communications rc
+                WHERE rc.organization_id = o.id AND rc.category = 'INTERVIEW') AS interviews,
+               (SELECT count(*) FROM recruitment_communications rc
+                WHERE rc.organization_id = o.id AND rc.category = 'QUESTIONNAIRE') AS technical_steps,
+               (SELECT count(*) FROM recruitment_communications rc
+                WHERE rc.organization_id = o.id AND rc.category = 'PROPOSAL') AS offers
         FROM organizations o
         WHERE o.slug = :slug AND o.deleted_at IS NULL
         """
