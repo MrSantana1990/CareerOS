@@ -1485,7 +1485,10 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                     before_pages = set(browser.pages)
                     try:
                         await visible_submit.click(timeout=8000)
-                    except Exception:
+                    except Exception as exc:
+                        application["live_click_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+                        event("LIVE_CLICK_FAILED", application_id=application["id"],
+                              error=type(exc).__name__, detail=str(exc)[:200])
                         break
                     await page.wait_for_timeout(2200)
                     opened_pages = [candidate for candidate in browser.pages if candidate not in before_pages]

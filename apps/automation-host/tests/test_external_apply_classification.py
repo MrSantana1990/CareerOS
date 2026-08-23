@@ -118,6 +118,25 @@ def test_same_origin_click_captures_post_click_evidence_before_judging_confirmat
     assert 'application["post_click_evidence"] = str(post_click_evidence)' in same_origin_section
 
 
+def test_a_failed_live_click_records_the_real_exception_instead_of_failing_silently() -> None:
+    # Achado real: quando visible_submit.click() lança exceção (elemento
+    # obsoleto, coberto por overlay, timeout), o laço quebrava em silêncio e
+    # o motivo final ("candidatura é externa... após seguir a navegação")
+    # ficava incorreto pra esse caso - nenhum hop foi seguido de verdade,
+    # só o clique falhou. Sem capturar tipo+mensagem da exceção, é
+    # impossível distinguir esse caso de um redirecionamento externo real.
+    source = _source()
+    start = source.index("if can_submit and live_allowed:")
+    end = source.index('            else:\n                application["status"] = "READY_FOR_REVIEW"')
+    body = source[start:end]
+    click_start = body.index("await visible_submit.click(timeout=8000)")
+    click_except_end = body.index("break", click_start)
+    click_except_block = body[click_start:click_except_end]
+    assert "except Exception as exc:" in click_except_block
+    assert 'application["live_click_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"' in click_except_block
+    assert 'event("LIVE_CLICK_FAILED", application_id=application["id"],' in click_except_block
+
+
 def test_external_hops_still_count_toward_the_max_steps_safety_bound() -> None:
     # Sem isso, uma cadeia de redirecionamentos externos poderia rodar
     # indefinidamente em vez de eventualmente cair no caminho honesto de
