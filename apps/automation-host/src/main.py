@@ -532,6 +532,8 @@ async def ensure_browser() -> BrowserContext:
     if context:
         return context
     PROFILE.mkdir(parents=True, exist_ok=True)
+    for stale_lock in PROFILE.glob("Singleton*"):
+        stale_lock.unlink(missing_ok=True)
     playwright = await async_playwright().start()
     launch_options: dict[str, object] = {
         "user_data_dir": str(PROFILE),
