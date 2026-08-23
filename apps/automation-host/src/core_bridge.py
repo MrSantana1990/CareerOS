@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import json
+import re
 
 SCHEMA_VERSION = 1
 
@@ -52,6 +53,48 @@ class CoreSyncRecord:
     def from_dict(cls, data: dict) -> "CoreSyncRecord":
         known = set(cls.__dataclass_fields__)
         return cls(**{key: value for key, value in data.items() if key in known})
+
+
+# Achado ao vivo (primeira validação em produção, 23/08/2026): o título de
+# página do InfoJobs não contém empresa nenhuma - é so o próprio texto
+# padrão do agregador ("Vaga de emprego de X em Y"), o que gerava um nome
+# de empresa fabricado por engano. O LinkedIn tem um sinal muito mais forte
+# na própria URL (".../.-at-<empresa>-<id>").
+_LINKEDIN_COMPANY_URL_PATTERN = re.compile(r"-at-([a-z0-9-]+?)-\d+(?:[/?]|$)", re.IGNORECASE)
+_JOB_BOARD_BOILERPLATE = re.compile(
+    r"vaga de emprego|processo seletivo|oportunidade de emprego|^vaga\b|empregos? em\b",
+    re.IGNORECASE,
+)
+
+
+def guess_company_from_linkedin_url(source_url: str) -> str:
+    match = _LINKEDIN_COMPANY_URL_PATTERN.search(source_url)
+    if not match:
+        return ""
+    slug = match.group(1)
+    return " ".join(word.capitalize() for word in slug.split("-") if word)
+
+
+def looks_like_job_board_boilerplate(candidate: str) -> bool:
+    return bool(_JOB_BOARD_BOILERPLATE.search(candidate))
+
+
+def guess_company(*, source: str, source_url: str, page_title: str) -> str:
+    """Melhor esforço pra extrair nome da empresa sem inventar nada. Usa a
+    URL do LinkedIn (sinal forte) quando disponível; caso contrário cai
+    pro título da página, descartando qualquer resultado que pareça o
+    texto padrão do agregador em vez de um nome de empresa real. Retorna
+    "" quando não há sinal confiável - o chamador deve pular a vaga
+    nesse caso, nunca inventar um nome."""
+    if source == "LinkedIn":
+        from_url = guess_company_from_linkedin_url(source_url)
+        if from_url:
+            return from_url
+    parts = [part.strip() for part in re.split(r"\s[-|–]\s", page_title) if part.strip()]
+    candidate = parts[-1] if parts else ""
+    if not candidate or looks_like_job_board_boilerplate(candidate):
+        return ""
+    return candidate
 
 
 def job_idempotency_key(source: str, source_url: str) -> str:

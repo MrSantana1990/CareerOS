@@ -18,7 +18,7 @@ from playwright.async_api import BrowserContext, Frame, Page, Playwright, async_
 
 from .anti_spam import remaining_daily_quota
 from .ats_detection import ATSMatch, detect_ats
-from .core_bridge import CoreSyncRecord, build_job_record, is_due, send_core_sync
+from .core_bridge import CoreSyncRecord, build_job_record, guess_company, is_due, send_core_sync
 from .email_discovery import detect_email_application
 from .evidence_check import is_evidence_grounded
 from .hard_blocks import assess_hard_blocks, extract_salary_brl
@@ -671,9 +671,11 @@ async def sync_job_to_core(page: Page, job: dict, application: dict, body: str) 
     """Encaminha a vaga para o Core assim que existe dado real o bastante -
     a descoberta inicial (automation_run) so tem titulo bruto do link e
     URL, sem nome de empresa; isso so aparece depois de abrir a pagina de
-    verdade, aqui. Extracao de empresa e heuristica (titulo da pagina),
-    nao uma garantia por plataforma - revisao humana continua necessaria
-    ate refinarmos por site. Nunca bloqueia o fluxo local: qualquer falha
+    verdade, aqui. Extracao de empresa e heuristica (guess_company em
+    core_bridge.py: URL do LinkedIn quando disponivel, titulo da pagina
+    caso contrario, descartando texto padrao de agregador) - nao e uma
+    garantia por plataforma, revisao humana continua necessaria ate
+    refinarmos por site. Nunca bloqueia o fluxo local: qualquer falha
     aqui vira so um evento de log."""
     if not CAREER_ADMIN_TOKEN:
         return
@@ -681,8 +683,8 @@ async def sync_job_to_core(page: Page, job: dict, application: dict, body: str) 
         page_title = (await page.title()) or ""
     except Exception:
         page_title = ""
-    parts = [part.strip() for part in re.split(r"\s[-|–]\s", page_title) if part.strip()]
-    company = parts[-1] if parts else ""
+    company = guess_company(source=str(job.get("source", "")), source_url=str(job.get("url", "")),
+                             page_title=page_title)
     if not company:
         event("CORE_SYNC_SKIPPED_NO_COMPANY", job_url=job.get("url", ""))
         return
