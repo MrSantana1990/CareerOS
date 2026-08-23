@@ -437,7 +437,7 @@ async def prepare_application(job_id: UUID, slug: str = Depends(require_admin)) 
                automation_mode, reason, evidence)
             VALUES (gen_random_uuid(), :organization_id, :application_id, 'APPLICATION_PREPARED',
                     'PREPARING', 'SYSTEM', 'ASSISTED', 'Preparação sem envio',
-                    jsonb_build_object('strategy', :strategy::text, 'resume_hash', :resume_hash::text))
+                    jsonb_build_object('strategy', CAST(:strategy AS text), 'resume_hash', CAST(:resume_hash AS text)))
         """), {"organization_id": org_id, "application_id": application["id"],
                 "strategy": strategy, "resume_hash": selected["sha256"]})
         await session.commit()
