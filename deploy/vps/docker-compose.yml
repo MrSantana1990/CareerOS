@@ -115,7 +115,7 @@ services:
       ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:?Defina ADMIN_API_TOKEN}"
       EXECUTOR_ID: "vps-integrations"
       BROWSER_HEADLESS: "false"
-      BROWSER_CHANNEL: "chromium"
+      BROWSER_CHANNEL: "chrome"
       AUTO_APPLY_ENABLED: "false"
       DRY_RUN_ENABLED: "false"
     volumes:

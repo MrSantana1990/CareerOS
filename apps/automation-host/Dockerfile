@@ -3,6 +3,7 @@ WORKDIR /app
 COPY pyproject.toml .
 RUN pip install --no-cache-dir .
 RUN playwright install --with-deps chromium
+RUN playwright install --with-deps chrome
 RUN apt-get update && apt-get install -y --no-install-recommends xvfb && rm -rf /var/lib/apt/lists/*
 COPY src src
 ENV CAREER_RUNTIME=/data/runtime
