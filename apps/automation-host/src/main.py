@@ -1576,7 +1576,11 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
         except Exception as exc:
             application["status"] = "FAILED"
             application["reason"] = f"Falha na preparação: {type(exc).__name__}."
-            remember_layout(application, "exception", {"error": type(exc).__name__, "url": page.url[:160]})
+            application["prepare_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+            event("APPLICATION_PREPARE_FAILED", application_id=application["id"],
+                  error=type(exc).__name__, detail=str(exc)[:200])
+            remember_layout(application, "exception",
+                             {"error": type(exc).__name__, "detail": str(exc)[:200], "url": page.url[:160]})
         finally:
             save_json(APPLICATIONS, applications)
             await sync_status_to_core(application)
