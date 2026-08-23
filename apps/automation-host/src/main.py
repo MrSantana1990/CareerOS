@@ -1328,6 +1328,8 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 candidate_link = action_links.nth(link_index)
                 if await candidate_link.is_visible():
                     action_href = await candidate_link.get_attribute("href")
+                    if action_href and action_href.strip().lower().startswith("javascript:"):
+                        action_href = None
                     if action_href:
                         break
             action_clicked = await click_first_visible(page, EXTERNAL_APPLY_CTA_PATTERN)
