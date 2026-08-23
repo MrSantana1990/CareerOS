@@ -18,6 +18,7 @@ from playwright.async_api import BrowserContext, Frame, Page, Playwright, async_
 
 from .anti_spam import remaining_daily_quota
 from .ats_detection import ATSMatch, detect_ats
+from .core_bridge import CoreSyncRecord, build_job_record, is_due, send_core_sync
 from .email_discovery import detect_email_application
 from .evidence_check import is_evidence_grounded
 from .hard_blocks import assess_hard_blocks, extract_salary_brl
@@ -49,6 +50,8 @@ GOOGLE_INBOX = RUNTIME / "google" / "career-mail.json"
 GOOGLE_STATUS_CACHE = RUNTIME / "google" / "connection-status.json"
 GOOGLE_HEALTH = RUNTIME / "google" / "health.json"
 GOOGLE_HEALTH_ALERT_THRESHOLD = 3
+CORE_SYNC_OUTBOX = RUNTIME / "core-sync-outbox.jsonl"
+CORE_SYNC_DEAD_LETTER = RUNTIME / "core-sync-dead-letter.jsonl"
 LOCAL_AI_URL = os.getenv("LOCAL_AI_URL", "http://127.0.0.1:8080/v1")
 RESUME_STORAGE = Path(os.getenv("RESUME_STORAGE_DIR", "/data/resumes")).resolve()
 CAREER_API_URL = os.getenv("CAREER_API_URL", "http://api:8000").rstrip("/")
@@ -664,6 +667,39 @@ async def automation_run(request: RunRequest) -> None:
         raise
 
 
+async def sync_job_to_core(page: Page, job: dict, application: dict, body: str) -> None:
+    """Encaminha a vaga para o Core assim que existe dado real o bastante -
+    a descoberta inicial (automation_run) so tem titulo bruto do link e
+    URL, sem nome de empresa; isso so aparece depois de abrir a pagina de
+    verdade, aqui. Extracao de empresa e heuristica (titulo da pagina),
+    nao uma garantia por plataforma - revisao humana continua necessaria
+    ate refinarmos por site. Nunca bloqueia o fluxo local: qualquer falha
+    aqui vira so um evento de log."""
+    if not CAREER_ADMIN_TOKEN:
+        return
+    try:
+        page_title = (await page.title()) or ""
+    except Exception:
+        page_title = ""
+    parts = [part.strip() for part in re.split(r"\s[-|–]\s", page_title) if part.strip()]
+    company = parts[-1] if parts else ""
+    if not company:
+        event("CORE_SYNC_SKIPPED_NO_COMPANY", job_url=job.get("url", ""))
+        return
+    record = build_job_record(
+        source=str(job.get("source", "")),
+        source_url=str(job.get("url", "")),
+        company=company[:200],
+        title=str(application.get("title", ""))[:240],
+        description=body[:12000],
+        location=str(job.get("location_search", ""))[:200],
+        correlation_id=application["id"],
+    )
+    enqueue_core_sync(record)
+    event("CORE_SYNC_ENQUEUED", kind="JOB", correlation_id=application["id"],
+          idempotency_key=record.idempotency_key)
+
+
 async def inspect_application_queue(request: PrepareRequest) -> None:
     profile = ProfessionalProfile.model_validate(load_json(PROFILE_DATA, {}))
     settings = AutomationSettings.model_validate(load_json(SETTINGS_DATA, {}))
@@ -710,6 +746,7 @@ async def inspect_application_queue(request: PrepareRequest) -> None:
             body = (await page.locator("body").inner_text(timeout=10_000))[:80_000]
             assessment = opportunity_feedback(application["title"], body, settings)
             application.update(assessment)
+            await sync_job_to_core(page, job, application, body)
             if re.search(r"n[aã]o aceita mais candidaturas|vaga (?:foi )?encerrada|processo seletivo encerrado|no longer accepting applications|job is no longer available", body, re.IGNORECASE):
                 application["status"] = "CLOSED"
                 application["reason"] = "Vaga encerrada: a plataforma não aceita mais candidaturas."
@@ -1339,6 +1376,73 @@ async def daily_scheduler() -> None:
         await asyncio.sleep(60)
 
 
+def enqueue_core_sync(record: CoreSyncRecord) -> None:
+    """Nunca bloqueia o chamador: so acrescenta uma linha ao outbox local.
+    A entrega de verdade (com retry/backoff) acontece em core_sync_scheduler."""
+    CORE_SYNC_OUTBOX.parent.mkdir(parents=True, exist_ok=True)
+    with CORE_SYNC_OUTBOX.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
+
+
+def _load_core_sync_outbox() -> list[CoreSyncRecord]:
+    if not CORE_SYNC_OUTBOX.exists():
+        return []
+    records = []
+    for line in CORE_SYNC_OUTBOX.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(CoreSyncRecord.from_dict(json.loads(line)))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return records
+
+
+def _rewrite_core_sync_outbox(records: list[CoreSyncRecord]) -> None:
+    CORE_SYNC_OUTBOX.parent.mkdir(parents=True, exist_ok=True)
+    with CORE_SYNC_OUTBOX.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
+
+
+def _dead_letter_core_sync(record: CoreSyncRecord) -> None:
+    CORE_SYNC_DEAD_LETTER.parent.mkdir(parents=True, exist_ok=True)
+    with CORE_SYNC_DEAD_LETTER.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
+
+
+async def core_sync_scheduler() -> None:
+    await asyncio.sleep(15)
+    while True:
+        records = _load_core_sync_outbox()
+        if records:
+            now = datetime.now(UTC)
+            remaining: list[CoreSyncRecord] = []
+            for record in records:
+                if not is_due(record, now):
+                    remaining.append(record)
+                    continue
+                result = await asyncio.to_thread(send_core_sync, CAREER_API_URL, CAREER_ADMIN_TOKEN, record)
+                if result.ok:
+                    event("CORE_SYNC_OK", kind=record.kind, correlation_id=record.correlation_id,
+                          idempotency_key=record.idempotency_key, attempts=record.attempts + 1)
+                    continue
+                record.attempts += 1
+                record.last_error = result.error
+                record.last_attempt_at = now.isoformat()
+                if not result.retryable or record.attempts >= 5:
+                    event("CORE_SYNC_DEAD_LETTERED", kind=record.kind, correlation_id=record.correlation_id,
+                          idempotency_key=record.idempotency_key, attempts=record.attempts, error=result.error)
+                    _dead_letter_core_sync(record)
+                else:
+                    event("CORE_SYNC_RETRY_SCHEDULED", kind=record.kind, correlation_id=record.correlation_id,
+                          attempts=record.attempts, error=result.error)
+                    remaining.append(record)
+            _rewrite_core_sync_outbox(remaining)
+        await asyncio.sleep(30)
+
+
 async def google_mail_scheduler() -> None:
     await asyncio.sleep(20)
     while True:
@@ -1374,6 +1478,7 @@ async def startup_scheduler() -> None:
     update(status="ready", message="Agente pronto. Próximas execuções automáticas: 08:00, 12:00 e 18:00.")
     asyncio.create_task(daily_scheduler())
     asyncio.create_task(google_mail_scheduler())
+    asyncio.create_task(core_sync_scheduler())
 
 
 @app.get("/health")
@@ -1427,6 +1532,45 @@ async def get_metrics() -> dict[str, object]:
 @app.get("/ai/status")
 async def get_ai_status() -> dict[str, object]:
     return await local_ai_status()
+
+
+@app.get("/core-sync/status")
+async def core_sync_status() -> dict:
+    outbox = _load_core_sync_outbox()
+    dead_letter_count = 0
+    if CORE_SYNC_DEAD_LETTER.exists():
+        dead_letter_count = sum(1 for line in CORE_SYNC_DEAD_LETTER.read_text(encoding="utf-8").splitlines() if line.strip())
+    by_kind: dict[str, int] = {}
+    for record in outbox:
+        by_kind[record.kind] = by_kind.get(record.kind, 0) + 1
+    return {"pending": len(outbox), "pending_by_kind": by_kind, "dead_letter": dead_letter_count}
+
+
+@app.post("/core-sync/dead-letter/{idempotency_key:path}/requeue")
+async def core_sync_requeue(idempotency_key: str) -> dict:
+    if not CORE_SYNC_DEAD_LETTER.exists():
+        raise HTTPException(status_code=404, detail="Nenhuma entrada na dead-letter.")
+    lines = [line for line in CORE_SYNC_DEAD_LETTER.read_text(encoding="utf-8").splitlines() if line.strip()]
+    remaining: list[str] = []
+    requeued: dict | None = None
+    for line in lines:
+        data = json.loads(line)
+        if requeued is None and data.get("idempotency_key") == idempotency_key:
+            requeued = data
+            continue
+        remaining.append(line)
+    if requeued is None:
+        raise HTTPException(status_code=404, detail="Chave não encontrada na dead-letter.")
+    record = CoreSyncRecord.from_dict(requeued)
+    record.attempts = 0
+    record.last_error = None
+    record.last_attempt_at = None
+    enqueue_core_sync(record)
+    with CORE_SYNC_DEAD_LETTER.open("w", encoding="utf-8") as handle:
+        for line in remaining:
+            handle.write(line + "\n")
+    event("CORE_SYNC_REQUEUED", idempotency_key=idempotency_key, kind=record.kind)
+    return {"requeued": True, "kind": record.kind}
 
 
 @app.get("/google/status")
