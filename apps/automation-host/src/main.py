@@ -227,6 +227,7 @@ class AnalyzeRequest(BaseModel):
 
 class PrepareRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=50)
+    job_urls: list[str] = []
 
 
 class AutomationSettings(BaseModel):
@@ -753,10 +754,19 @@ async def inspect_application_queue(request: PrepareRequest) -> None:
     settings = AutomationSettings.model_validate(load_json(SETTINGS_DATA, {}))
     applications = load_json(APPLICATIONS, [])
     indexed = {item["job_url"]: item for item in applications}
+    target_urls = set(request.job_urls)
+    if target_urls:
+        # Mirar URL(s) especifica(s) substitui o registro existente (se
+        # houver) em vez de duplicar - usado pra reprocessar uma vaga
+        # pontual com o codigo atual sem criar uma segunda candidatura
+        # pra mesma vaga.
+        for url in target_urls:
+            indexed.pop(url, None)
     jobs = load_json(RESULTS, [])
     candidates = [
         job for job in jobs
         if job.get("decision") == "APPROVED_AUTO" and job.get("url") not in indexed
+        and (not target_urls or job.get("url") in target_urls)
     ]
     candidates.sort(key=lambda job: (
         -(datetime.fromisoformat(job.get("first_seen_at") or job.get("collected_at")).timestamp()),
