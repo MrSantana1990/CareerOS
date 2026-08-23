@@ -1511,6 +1511,17 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                                 break
                         continue
                     resolved = True
+                    # Mesma origem, sem nova aba - antes de checar confirmação, tenta
+                    # dispensar qualquer diálogo/interstício que o clique tenha aberto
+                    # (ex: "Sair do LinkedIn?"), que não é nem envio nem navegação
+                    # externa detectável, mas pode estar cobrindo a página real.
+                    await dismiss_overlays(page)
+                    post_click_evidence = SCREENSHOTS / f"{application['id']}-post-click.png"
+                    try:
+                        await page.screenshot(path=str(post_click_evidence), full_page=True)
+                        application["post_click_evidence"] = str(post_click_evidence)
+                    except Exception:
+                        pass
                     if await submission_confirmed(page, before_submit):
                         application["status"] = "APPLIED"
                         application["submitted_at"] = datetime.now(UTC).isoformat()
@@ -1525,7 +1536,7 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                         await report_intervention(
                             application, "SUBMISSION_UNCONFIRMED", "Confirme o envio da candidatura",
                             "A plataforma não confirmou o envio. Verifique a página antes de tentar novamente.",
-                            page.url,
+                            page.url, {"post_click_url": page.url},
                         )
                     break
                 if external_apply_hops:

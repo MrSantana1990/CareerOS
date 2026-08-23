@@ -101,6 +101,23 @@ def test_unresolved_external_apply_ends_in_manual_required_with_an_honest_reason
     assert "conclua manualmente no site de destino" in body
 
 
+def test_same_origin_click_captures_post_click_evidence_before_judging_confirmation() -> None:
+    # Sem isso, uma tentativa "sem confirmação" nunca tinha nenhuma prova
+    # visual do que a página realmente mostrava depois do clique - só a
+    # captura de ANTES (tirada na etapa de preparo). dismiss_overlays
+    # também roda aqui, pra não deixar um diálogo/interstício cobrindo a
+    # página real antes de checar confirmação.
+    source = _source()
+    start = source.index("if can_submit and live_allowed:")
+    end = source.index('            else:\n                application["status"] = "READY_FOR_REVIEW"')
+    body = source[start:end]
+    same_origin_start = body.index("resolved = True")
+    same_origin_section = body[same_origin_start:]
+    assert "await dismiss_overlays(page)" in same_origin_section
+    assert 'post_click_evidence = SCREENSHOTS / f"{application[\'id\']}-post-click.png"' in same_origin_section
+    assert 'application["post_click_evidence"] = str(post_click_evidence)' in same_origin_section
+
+
 def test_external_hops_still_count_toward_the_max_steps_safety_bound() -> None:
     # Sem isso, uma cadeia de redirecionamentos externos poderia rodar
     # indefinidamente em vez de eventualmente cair no caminho honesto de
