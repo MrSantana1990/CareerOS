@@ -1230,6 +1230,8 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
             return True
         if application.get("status") == "READY_FOR_REVIEW" and "botão final não localizado" in application.get("reason", ""):
             return True
+        if application.get("status") == "READY_FOR_REVIEW" and "autoenvio desligado" in application.get("reason", ""):
+            return True
         if application.get("status") == "MANUAL_REQUIRED" and application.get("unknown_fields"):
             return True
         if application.get("status") == "MANUAL_REQUIRED" and "sem confirmação da plataforma" in application.get("reason", ""):
