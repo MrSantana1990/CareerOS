@@ -244,6 +244,7 @@ class ExecuteRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=50)
     confirm_live_submission: bool = False
     application_ids: list[str] = []
+    single_controlled_application_id: str | None = None
 
 
 class BootstrapRequest(BaseModel):
@@ -1343,7 +1344,21 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                 )
                 continue
             can_submit = visible_submit is not None
-            would_apply = request.confirm_live_submission and environment_auto_apply_enabled()
+            # Autorização de teste controlado: libera envio ao vivo SÓ para o
+            # application_id exato indicado nesta chamada, sem depender do
+            # interruptor global AUTO_APPLY_ENABLED (que continua desligado
+            # em produção). Nunca é setado por daily_scheduler/full_daily_pipeline
+            # - só existe quando alguém monta a chamada explicitamente com esse
+            # campo, então o agendador nunca herda isso por acidente.
+            single_controlled_match = (
+                request.single_controlled_application_id is not None
+                and application["id"] == request.single_controlled_application_id
+            )
+            if single_controlled_match:
+                event("SINGLE_CONTROLLED_SUBMISSION_AUTHORIZED", application_id=application["id"])
+            would_apply = request.confirm_live_submission and (
+                environment_auto_apply_enabled() or single_controlled_match
+            )
             quota_available = remaining_quota > 0
             live_allowed = would_apply and not dry_run_enabled() and quota_available
             if can_submit and would_apply and not dry_run_enabled() and not quota_available:

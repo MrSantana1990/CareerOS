@@ -14,7 +14,7 @@ def test_dry_run_enabled_reads_dedicated_env_var() -> None:
 
 def test_dry_run_is_an_independent_gate_from_auto_apply_enabled() -> None:
     source = _source()
-    assert "would_apply = request.confirm_live_submission and environment_auto_apply_enabled()" in source
+    assert "environment_auto_apply_enabled() or single_controlled_match" in source
     assert "live_allowed = would_apply and not dry_run_enabled()" in source
 
 
