@@ -7,9 +7,51 @@ from urllib.error import HTTPError, URLError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.core_bridge import (  # noqa: E402
-    CoreSyncRecord, backoff_seconds, build_job_record, is_due,
-    job_idempotency_key, send_core_sync,
+    CoreSyncRecord, backoff_seconds, build_job_record, guess_company,
+    guess_company_from_linkedin_url, is_due, job_idempotency_key,
+    looks_like_job_board_boilerplate, send_core_sync,
 )
+
+
+def test_guess_company_from_linkedin_url_extracts_the_at_slug() -> None:
+    url = ("https://br.linkedin.com/jobs/view/analista-de-suporte-de-t-i-s%C3%A3o-paulo-sp-"
+           "at-hospcom-hospitalar-4443708471?position=9")
+    assert guess_company_from_linkedin_url(url) == "Hospcom Hospitalar"
+
+
+def test_guess_company_from_linkedin_url_empty_when_pattern_absent() -> None:
+    assert guess_company_from_linkedin_url("https://br.linkedin.com/jobs/view/no-slug-here") == ""
+
+
+def test_looks_like_job_board_boilerplate_flags_infojobs_style_titles() -> None:
+    assert looks_like_job_board_boilerplate("Vaga de emprego de Engenheiro de Dados em Todo Brasil")
+
+
+def test_looks_like_job_board_boilerplate_allows_real_company_names() -> None:
+    assert not looks_like_job_board_boilerplate("Stefanini Group")
+
+
+def test_guess_company_prefers_linkedin_url_slug_over_page_title() -> None:
+    url = "https://br.linkedin.com/jobs/view/analista-de-dados-at-acme-corp-123456"
+    company = guess_company(source="LinkedIn", source_url=url, page_title="Something misleading")
+    assert company == "Acme Corp"
+
+
+def test_guess_company_falls_back_to_page_title_when_no_separator_present() -> None:
+    # Heurística fraca fora do LinkedIn: sem separador reconhecível, usa o
+    # título inteiro. Não há garantia de formato por plataforma - por isso
+    # continua exigindo revisão humana até refinarmos site a site.
+    company = guess_company(source="Catho", source_url="https://catho.com/vaga/1",
+                             page_title="Acme Ltda")
+    assert company == "Acme Ltda"
+
+
+def test_guess_company_rejects_job_board_boilerplate_instead_of_fabricating() -> None:
+    company = guess_company(
+        source="InfoJobs", source_url="https://www.infojobs.com.br/vaga-de-x__123.aspx",
+        page_title="Vaga de emprego de ENGENHEIRO DE DADOS SR em Todo Brasil",
+    )
+    assert company == ""
 
 
 def test_job_idempotency_key_matches_job_sources_unique_constraint_granularity() -> None:

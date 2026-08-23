@@ -7,7 +7,7 @@ def _source() -> str:
 
 def test_main_imports_core_bridge_helpers() -> None:
     source = _source()
-    assert "from .core_bridge import CoreSyncRecord, build_job_record, is_due, send_core_sync" in source
+    assert "from .core_bridge import CoreSyncRecord, build_job_record, guess_company, is_due, send_core_sync" in source
 
 
 def test_core_sync_scheduler_treats_dead_letter_as_a_hard_stop_not_infinite_retry() -> None:
