@@ -538,7 +538,19 @@ async def ensure_browser() -> BrowserContext:
         "headless": BROWSER_HEADLESS,
         "viewport": {"width": 1440, "height": 900},
         "locale": "pt-BR",
-        "args": ["--disable-dev-shm-usage", "--no-sandbox"],
+        "args": [
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--disable-background-networking",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--metrics-recording-only",
+            "--mute-audio",
+            "--renderer-process-limit=2",
+            "--js-flags=--max-old-space-size=256",
+        ],
     }
     if BROWSER_CHANNEL and BROWSER_CHANNEL != "chromium":
         launch_options["channel"] = BROWSER_CHANNEL
