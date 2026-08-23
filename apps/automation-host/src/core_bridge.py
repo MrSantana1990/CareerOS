@@ -128,6 +128,30 @@ def build_job_record(*, source: str, source_url: str, company: str, title: str,
     )
 
 
+def build_score_record(*, job_id: str, correlation_id: str) -> CoreSyncRecord:
+    """POST /jobs/{id}/score não tem corpo - job_id só serve pra montar o
+    caminho da rota (ver _endpoint_for/_body_for)."""
+    return CoreSyncRecord(kind="SCORE", payload={"job_id": job_id},
+                           idempotency_key=f"score:{job_id}", correlation_id=correlation_id)
+
+
+def build_prepare_record(*, job_id: str, correlation_id: str) -> CoreSyncRecord:
+    """POST /jobs/{id}/prepare também não tem corpo - mesma lógica do score."""
+    return CoreSyncRecord(kind="PREPARE", payload={"job_id": job_id},
+                           idempotency_key=f"prepare:{job_id}", correlation_id=correlation_id)
+
+
+# Recomendações do Core (quality.py) que bloqueiam a preparação da
+# candidatura - espelha exatamente o gate que POST /jobs/{id}/prepare já
+# aplica no lado do servidor (score >= 75 e decision fora deste conjunto).
+NOT_ELIGIBLE_RECOMMENDATIONS = {"BLOCK", "DISCARD"}
+PREPARE_SCORE_THRESHOLD = 75
+
+
+def is_eligible_for_prepare(total: int, recommendation: str) -> bool:
+    return total >= PREPARE_SCORE_THRESHOLD and recommendation not in NOT_ELIGIBLE_RECOMMENDATIONS
+
+
 def backoff_seconds(attempts: int) -> int:
     index = min(max(attempts, 0), len(BACKOFF_SECONDS) - 1)
     return BACKOFF_SECONDS[index]
@@ -151,16 +175,29 @@ class SyncResult:
 def _endpoint_for(record: CoreSyncRecord) -> tuple[str, str]:
     if record.kind == "JOB":
         return "POST", "/api/v1/jobs"
+    if record.kind == "SCORE":
+        return "POST", f"/api/v1/jobs/{record.payload['job_id']}/score"
+    if record.kind == "PREPARE":
+        return "POST", f"/api/v1/jobs/{record.payload['job_id']}/prepare"
     raise ValueError(f"Tipo de sincronização desconhecido: {record.kind}")
+
+
+def _body_for(record: CoreSyncRecord) -> dict | None:
+    """SCORE e PREPARE não têm corpo no Core - job_id em payload só existe
+    pra montar o caminho da rota (ver _endpoint_for). Só JOB manda corpo."""
+    if record.kind == "JOB":
+        return record.payload
+    return None
 
 
 def send_core_sync(api_url: str, admin_token: str, record: CoreSyncRecord, timeout: int = 20) -> SyncResult:
     if not admin_token:
         return SyncResult(ok=False, retryable=False, error="missing_admin_token")
     method, path = _endpoint_for(record)
+    body = _body_for(record)
     request = Request(
         api_url.rstrip("/") + path,
-        data=json.dumps(record.payload, ensure_ascii=False).encode("utf-8"),
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None,
         headers={
             "Authorization": f"Bearer {admin_token}",
             "Content-Type": "application/json",

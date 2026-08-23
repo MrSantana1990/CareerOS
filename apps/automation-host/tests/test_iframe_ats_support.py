@@ -35,7 +35,7 @@ def test_form_filling_functions_operate_on_a_root_not_just_the_top_page() -> Non
     # em cada etapa do formulário (fill_current_step busca raízes frescas a cada chamada,
     # porque clicar em "próxima etapa" pode mudar os frames disponíveis).
     assert "roots = await search_roots(page)" in source
-    assert "for root in await search_roots(page):\n                    filled.extend(await fill_known_fields(root, profile))" in source
+    assert "for root in await search_roots(page):\n                    filled.extend(await fill_known_fields(root, effective_profile))" in source
 
 
 def test_detected_ats_checks_every_root_not_just_the_top_url() -> None:

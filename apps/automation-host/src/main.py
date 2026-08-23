@@ -18,7 +18,9 @@ from playwright.async_api import BrowserContext, Frame, Page, Playwright, async_
 
 from .anti_spam import remaining_daily_quota
 from .ats_detection import ATSMatch, detect_ats
-from .core_bridge import CoreSyncRecord, build_job_record, guess_company, is_due, send_core_sync
+from .core_bridge import (CoreSyncRecord, build_job_record, build_prepare_record,
+                          build_score_record, guess_company, is_due, is_eligible_for_prepare,
+                          send_core_sync)
 from .email_discovery import detect_email_application
 from .evidence_check import is_evidence_grounded
 from .hard_blocks import assess_hard_blocks, extract_salary_brl
@@ -52,6 +54,8 @@ GOOGLE_HEALTH = RUNTIME / "google" / "health.json"
 GOOGLE_HEALTH_ALERT_THRESHOLD = 3
 CORE_SYNC_OUTBOX = RUNTIME / "core-sync-outbox.jsonl"
 CORE_SYNC_DEAD_LETTER = RUNTIME / "core-sync-dead-letter.jsonl"
+CORE_SYNC_LINKS = RUNTIME / "core-sync-links.json"
+CORE_RESUMES_DIR = RUNTIME / "core-resumes"
 LOCAL_AI_URL = os.getenv("LOCAL_AI_URL", "http://127.0.0.1:8080/v1")
 RESUME_STORAGE = Path(os.getenv("RESUME_STORAGE_DIR", "/data/resumes")).resolve()
 CAREER_API_URL = os.getenv("CAREER_API_URL", "http://api:8000").rstrip("/")
@@ -667,6 +671,46 @@ async def automation_run(request: RunRequest) -> None:
         raise
 
 
+async def resolve_resume_for_application(application: dict) -> tuple[str, str | None]:
+    """Devolve (caminho_local, resume_version_id) do currículo que o
+    Resume Router do Core escolheu pra esta candidatura (família + idioma,
+    só aprovado), quando o Core já preparou essa vaga. Nunca bloqueia se o
+    Core estiver fora do ar ou a vaga ainda não foi preparada lá - nesse
+    caso devolve ("", None) e o chamador cai pro currículo local
+    configurado (profile.resume_path), sem fingir que usou o certo."""
+    if not CAREER_ADMIN_TOKEN:
+        return "", None
+    entry = _load_core_sync_links().get(application["id"], {})
+    version_id = entry.get("resume_version_id")
+    if not version_id:
+        return "", None
+    cached = list(CORE_RESUMES_DIR.glob(f"{version_id}.*")) if CORE_RESUMES_DIR.exists() else []
+    if cached:
+        return str(cached[0]), version_id
+
+    def fetch() -> tuple[bytes, str]:
+        request = Request(
+            CAREER_API_URL + f"/api/v1/resumes/{version_id}/file",
+            headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}"},
+        )
+        with urlopen(request, timeout=30) as response:
+            filename = response.headers.get("X-Resume-Filename", "") or f"{version_id}.pdf"
+            return response.read(), filename
+
+    try:
+        content, filename = await asyncio.to_thread(fetch)
+    except (URLError, TimeoutError, OSError) as exc:
+        event("CORE_RESUME_DOWNLOAD_FAILED", application_id=application["id"],
+              resume_version_id=version_id, error=type(exc).__name__)
+        return "", None
+    suffix = Path(filename).suffix or ".pdf"
+    target = CORE_RESUMES_DIR / f"{version_id}{suffix}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    event("CORE_RESUME_DOWNLOADED", application_id=application["id"], resume_version_id=version_id)
+    return str(target), version_id
+
+
 async def sync_job_to_core(page: Page, job: dict, application: dict, body: str) -> None:
     """Encaminha a vaga para o Core assim que existe dado real o bastante -
     a descoberta inicial (automation_run) so tem titulo bruto do link e
@@ -1219,14 +1263,20 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
             application["detected_ats_account"] = ats_match.account_key if ats_match else None
             if ats_match:
                 await suggest_source_connection(ats_match)
+            resume_override_path, core_resume_version_id = await resolve_resume_for_application(application)
+            application["core_resume_version_id"] = core_resume_version_id
+            effective_profile = (
+                profile.model_copy(update={"resume_path": resume_override_path})
+                if resume_override_path else profile
+            )
             filled: list[str] = []
             ai_filled: list[dict[str, object]] = []
 
             async def fill_current_step() -> list[str]:
                 step_unknown: list[str] = []
                 for root in await search_roots(page):
-                    filled.extend(await fill_known_fields(root, profile))
-                    ai_result = await ai_fill_simple_questions(root, profile, application)
+                    filled.extend(await fill_known_fields(root, effective_profile))
+                    ai_result = await ai_fill_simple_questions(root, effective_profile, application)
                     ai_filled.extend(ai_result.get("filled", []))
                     step_unknown.extend(await required_unknown_fields(root))
                 return step_unknown
@@ -1414,6 +1464,52 @@ def _dead_letter_core_sync(record: CoreSyncRecord) -> None:
         handle.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
 
 
+def _load_core_sync_links() -> dict:
+    return load_json(CORE_SYNC_LINKS, {})
+
+
+def _update_core_sync_link(correlation_id: str, **fields: object) -> None:
+    links = _load_core_sync_links()
+    entry = links.get(correlation_id, {})
+    entry.update(fields)
+    links[correlation_id] = entry
+    save_json(CORE_SYNC_LINKS, links)
+
+
+def _advance_core_sync_chain(record: CoreSyncRecord, response: dict | None) -> None:
+    """JOB sincronizado -> pontua; pontuação elegível -> prepara (Resume
+    Router de verdade). Cada etapa só avança se a anterior teve sucesso -
+    nunca pula direto pra prepare sem o job_id/score reais do Core."""
+    if response is None or response.get("already_applied"):
+        return
+    if record.kind == "JOB":
+        job_id = response.get("id")
+        if not job_id:
+            return
+        _update_core_sync_link(record.correlation_id, job_id=job_id)
+        enqueue_core_sync(build_score_record(job_id=job_id, correlation_id=record.correlation_id))
+    elif record.kind == "SCORE":
+        job_id = record.payload.get("job_id")
+        total = int(response.get("total", 0) or 0)
+        recommendation = str(response.get("recommendation", ""))
+        _update_core_sync_link(record.correlation_id, last_score=total, last_recommendation=recommendation)
+        if is_eligible_for_prepare(total, recommendation):
+            enqueue_core_sync(build_prepare_record(job_id=job_id, correlation_id=record.correlation_id))
+        else:
+            event("CORE_SYNC_NOT_ELIGIBLE", correlation_id=record.correlation_id,
+                  total=total, recommendation=recommendation)
+    elif record.kind == "PREPARE":
+        application = response.get("application") or {}
+        _update_core_sync_link(
+            record.correlation_id,
+            core_application_id=application.get("id"),
+            resume_version_id=application.get("resume_version_id"),
+            resume_family=response.get("resume_family"),
+        )
+        event("CORE_APPLICATION_PREPARED", correlation_id=record.correlation_id,
+              core_application_id=application.get("id"), resume_version_id=application.get("resume_version_id"))
+
+
 async def core_sync_scheduler() -> None:
     await asyncio.sleep(15)
     while True:
@@ -1429,6 +1525,7 @@ async def core_sync_scheduler() -> None:
                 if result.ok:
                     event("CORE_SYNC_OK", kind=record.kind, correlation_id=record.correlation_id,
                           idempotency_key=record.idempotency_key, attempts=record.attempts + 1)
+                    _advance_core_sync_chain(record, result.response)
                     continue
                 record.attempts += 1
                 record.last_error = result.error

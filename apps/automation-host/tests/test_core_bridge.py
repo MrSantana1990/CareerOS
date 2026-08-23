@@ -7,8 +7,9 @@ from urllib.error import HTTPError, URLError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.core_bridge import (  # noqa: E402
-    CoreSyncRecord, backoff_seconds, build_job_record, guess_company,
-    guess_company_from_linkedin_url, is_due, job_idempotency_key,
+    CoreSyncRecord, backoff_seconds, build_job_record, build_prepare_record,
+    build_score_record, guess_company, guess_company_from_linkedin_url,
+    is_due, is_eligible_for_prepare, job_idempotency_key,
     looks_like_job_board_boilerplate, send_core_sync,
 )
 
@@ -63,6 +64,56 @@ def test_guess_company_rejects_job_board_boilerplate_instead_of_fabricating() ->
         page_title="Vaga de emprego de ENGENHEIRO DE DADOS SR em Todo Brasil",
     )
     assert company == ""
+
+
+def test_score_record_has_no_body_only_a_path_job_id() -> None:
+    record = build_score_record(job_id="job-1", correlation_id="app-1")
+    assert record.kind == "SCORE"
+    assert record.payload == {"job_id": "job-1"}
+    assert record.idempotency_key == "score:job-1"
+
+
+def test_prepare_record_has_no_body_only_a_path_job_id() -> None:
+    record = build_prepare_record(job_id="job-1", correlation_id="app-1")
+    assert record.kind == "PREPARE"
+    assert record.idempotency_key == "prepare:job-1"
+
+
+def test_send_core_sync_sends_no_body_for_score_or_prepare() -> None:
+    record = build_score_record(job_id="job-1", correlation_id="app-1")
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"total": 80, "recommendation": "APPLY_HIGH"}'
+
+    def fake_urlopen(request, timeout=20):
+        captured["data"] = request.data
+        captured["method"] = request.method
+        captured["path"] = request.full_url
+        return FakeResponse()
+
+    with patch("src.core_bridge.urlopen", side_effect=fake_urlopen):
+        result = send_core_sync("http://api:8000", "token", record)
+    assert result.ok is True
+    assert captured["data"] is None
+    assert captured["method"] == "POST"
+    assert captured["path"] == "http://api:8000/api/v1/jobs/job-1/score"
+
+
+def test_is_eligible_for_prepare_matches_the_cores_own_gate() -> None:
+    assert is_eligible_for_prepare(75, "APPLY") is True
+    assert is_eligible_for_prepare(100, "APPLY_HIGH") is True
+    assert is_eligible_for_prepare(74, "APPLY") is False
+    assert is_eligible_for_prepare(90, "BLOCK") is False
+    assert is_eligible_for_prepare(90, "DISCARD") is False
+    assert is_eligible_for_prepare(65, "REVIEW") is False
 
 
 def test_job_idempotency_key_matches_job_sources_unique_constraint_granularity() -> None:
