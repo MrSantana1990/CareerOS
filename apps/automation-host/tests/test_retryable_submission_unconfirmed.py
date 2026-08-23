@@ -29,3 +29,20 @@ def test_form_filled_awaiting_a_live_submission_is_retryable() -> None:
     end = source.index("\n    pending = sorted(")
     body = source[start:end]
     assert '"autoenvio desligado" in application.get("reason", "")' in body
+
+
+def test_unresolved_external_apply_is_retryable_bounded_by_the_attempts_cap() -> None:
+    # Achado real: uma candidatura que caiu no motivo genérico "candidatura
+    # é externa a esta plataforma..." (ex: o clique falhou tecnicamente, não
+    # uma navegação externa de verdade - ver LIVE_CLICK_FAILED) precisa
+    # poder ser reexaminada pra diagnóstico, sem contornar o cap de
+    # segurança: attempts >= 3 continua bloqueando antes desta condição,
+    # então isso não reabre o caso Agibank (attempts já em 3).
+    source = _source()
+    start = source.index("def retryable(application: dict) -> bool:")
+    end = source.index("\n    pending = sorted(")
+    body = source[start:end]
+    assert '"candidatura é externa a esta plataforma" in application.get("reason", "")' in body
+    attempts_cap_index = body.index("if attempts >= 3:")
+    new_condition_index = body.index('"candidatura é externa a esta plataforma"')
+    assert attempts_cap_index < new_condition_index

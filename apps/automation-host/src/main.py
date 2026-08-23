@@ -1236,6 +1236,8 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
             return True
         if application.get("status") == "MANUAL_REQUIRED" and "sem confirmação da plataforma" in application.get("reason", ""):
             return True
+        if application.get("status") == "MANUAL_REQUIRED" and "candidatura é externa a esta plataforma" in application.get("reason", ""):
+            return True
         return False
 
     pending = sorted([
