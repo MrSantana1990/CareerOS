@@ -58,10 +58,12 @@ Cada candidatura registra arquivo, versão, idioma e hash do currículo realment
 | Release | Escopo | Estado |
 |---|---|---|
 | V1 Foundation | domínio, login, PostgreSQL, Redis, regras, auditoria e PWA | entregue |
-| V2 Radar | dashboard, Inbox, validação, scoring e deduplicação | em execução |
-| V3 Apply | currículo, e-mail, formulários, respostas e Playwright assistido | planejada |
-| V4 Intelligence | Gmail, Calendar, follow-up, métricas e aprendizado de conversão | planejada |
-| V5 Commercial | multiempresa, onboarding, planos, cobrança e suporte | futura |
+| V2 Radar | dashboard, Inbox, validação, scoring e deduplicação | entregue |
+| V3 Apply | currículo, e-mail, formulários, respostas e Playwright assistido | validado parcialmente (ver `continuous-improvement/CURRENT_STATE.md` — clique real e ponte com o Core comprovados; CONFIRMED ainda não alcançado) |
+| V4 Intelligence | Gmail, Calendar, follow-up, métricas e aprendizado de conversão | Gmail restaurado; follow-up/aprendizado bloqueados até haver ao menos 1 CONFIRMED real |
+| V5 Commercial | multiempresa, onboarding, planos, cobrança e suporte | congelada — ver `continuous-improvement/IMPROVEMENT_BACKLOG.md`, seção "Operation Interview" |
+
+Antes de trabalhar em qualquer item deste documento, ler [`continuous-improvement/README.md`](continuous-improvement/README.md) — o funil real de hoje pode divergir do desenho acima, e o backlog priorizado vive em `continuous-improvement/IMPROVEMENT_BACKLOG.md`.
 
 ## Critério de verdade no painel
 
