@@ -1,6 +1,7 @@
 import base64
 import json
 import re
+import time
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
@@ -11,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError as GoogleHttpError
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -194,6 +196,22 @@ def _event_candidate(subject: str, body: str) -> dict | None:
     return {"title": f"Processo seletivo: {subject}"[:180], "start": start.isoformat(), "end": (start + timedelta(hours=1)).isoformat(), "timezone": "America/Sao_Paulo"}
 
 
+def _get_message_with_backoff(gmail, message_id: str, attempts: int = 4):
+    """Achado real em produção: escanear ~350 mensagens numa unica rodada
+    estourava a cota "Units per minute per user" do Gmail (HttpError 403
+    rateLimitExceeded), derrubando o scan inteiro - nenhuma resposta de
+    recrutador era detectada. Backoff simples aqui evita que um pico
+    pontual de cota derrube a rodada inteira."""
+    for attempt in range(attempts):
+        try:
+            return gmail.users().messages().get(userId="me", id=message_id, format="full").execute()
+        except GoogleHttpError as exc:
+            is_rate_limited = exc.resp is not None and exc.resp.status in (403, 429)
+            if not is_rate_limited or attempt == attempts - 1:
+                raise
+            time.sleep(2 ** attempt)
+
+
 def scan_recruitment_mail(token_path: Path, store_path: Path, days: int = 30, limit: int = 100) -> dict:
     credentials = _credentials(token_path)
     gmail = build("gmail", "v1", credentials=credentials, cache_discovery=False)
@@ -208,7 +226,17 @@ def scan_recruitment_mail(token_path: Path, store_path: Path, days: int = 30, li
     by_id = {}
     discovered = 0
     for reference in references.values():
-        message = gmail.users().messages().get(userId="me", id=reference["id"], format="full").execute()
+        cached = previous.get(reference["id"])
+        if cached and cached.get("category") != "QUESTIONNAIRE":
+            # Achado real: toda rodada (a cada 10 minutos) buscava o corpo
+            # completo de TODAS as ~350 mensagens do período, mesmo as já
+            # classificadas antes - nada nesses campos muda depois da
+            # classificação, exceto para QUESTIONNAIRE (que tem
+            # revalidação própria mais abaixo). Isso multiplicava o custo
+            # de cota do Gmail sem necessidade nenhuma.
+            by_id[cached["message_id"]] = cached
+            continue
+        message = _get_message_with_backoff(gmail, reference["id"])
         headers = _headers(message.get("payload", {}))
         body = _body(message.get("payload", {}))
         category, confidence, reason = _classify(headers.get("subject", ""), body)
