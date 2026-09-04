@@ -4,12 +4,12 @@ Consultar antes de investigar qualquer falha de candidatura real. Cada item tem 
 
 ## Aberto — requer participação humana
 
-### Gmail — OAuth quebrado há 13 dias (crítico, bloqueia Tracking/Interview)
-- **Sintoma:** `GOOGLE_MAIL_SCAN_FAILED` com `error: "RefreshError"` a cada ~10 minutos, ininterrupto desde `2026-08-22T03:38:43` (mais de 1.800 falhas consecutivas até 04/09/2026).
-- **Impacto real:** nenhuma resposta de recrutador ou convite de entrevista está sendo correlacionada automaticamente há quase duas semanas — mesmo que tenha chegado por e-mail de verdade. Isso bloqueia completamente o estágio de Tracking/Interview Detection, o coração de "Operation Interview".
-- **Causa provável:** token de refresh do OAuth do Google revogado, expirado ou inválido (comum quando o app está em modo de teste/consentimento não usado por muito tempo, ou a senha da conta Google mudou).
-- **Não é corrigível por código.** Exige reautorização interativa humana.
-- **Ação necessária:** rodar `scripts/authorize-google.py` novamente (mesmo procedimento de `TROUBLESHOOTING.md`, seção "Google desconectado") e confirmar `.runtime/google/google-token.json` renovado, com sessão humana disponível para completar o consentimento OAuth no navegador.
+### Gmail — OAuth quebrado há 13 dias (RESOLVIDO em duas camadas, 04-05/09/2026)
+- **Sintoma original:** `GOOGLE_MAIL_SCAN_FAILED` com `error: "RefreshError"` a cada ~10 minutos, ininterrupto desde `2026-08-22T03:38:43` (mais de 1.800 falhas consecutivas).
+- **Impacto real confirmado:** um convite de entrevista real (Randstad/Mercado Livre, "2ª Etapa") ficou 13 dias sem resposta detectada pelo sistema, além de múltiplas confirmações de candidatura reais (Poliedro Educação, JAMEF, Squadra Digital, Gupy/Stefanini) e questionários.
+- **Camada 1 (ação humana):** token OAuth revogado/expirado. Reautorizado via `scripts/authorize-google.py` (login interativo humano, 04/09/2026 20:21) + token levado manualmente pra VPS + restart do `integrations`.
+- **Camada 2 (bug de código, achado só depois da camada 1):** mesmo com token válido, o scan continuava falhando com `HttpError 403 rateLimitExceeded` ("Quota exceeded... Units per minute per user"). Causa raiz real: (a) toda rodada de 10 em 10 minutos buscava o corpo completo de TODAS as ~350 mensagens do período de 90 dias, mesmo as já classificadas antes; (b) o ciclo rotineiro usava os mesmos parâmetros caros de um catch-up completo (90 dias/250 resultados) pra sempre. Corrigido em dois PRs: [#82](https://github.com/MrSantana1990/CareerOS/pull/82) (não reprocessar mensagem já classificada + retry com backoff) e [#83](https://github.com/MrSantana1990/CareerOS/pull/83) (ciclo rotineiro usa janela leve de 7 dias/40 resultados; `/google/scan` manual mantém a janela funda de 90d/250 para catch-up deliberado).
+- **Validar:** próximo ciclo agendado (10 min) deve gerar `GOOGLE_MAIL_SCANNED` sem `HttpError`.
 
 ### LinkedIn/Agibank — clique sem navegação observável
 - **Aplicação:** `ce0370a8-2c1d-45f5-9e1a-4fa7ea89052d`, `attempts=3` (cap atingido, não tocar novamente).
