@@ -31,8 +31,8 @@ Atualizado após o Cycle 001 (Operation Interview). Ver histórico da validaçã
 | Scoring | **PARCIAL** | Funciona; não validado se prioriza de fato as famílias que convertem (não há dado de conversão ainda) |
 | Resume Router | **OK** | Currículo real por família/idioma, via Core, nunca caminho estático local |
 | Application (preparo/clique) | **PARCIAL, melhorando** | 77% das candidaturas terminavam `FAILED`; 49% delas por um único bug (OOM ao reaproveitar página do Chrome no lote inteiro) — corrigido e medido no Cycle 001 (PR #80): lote de 14 candidaturas reais, 0 crashes. Clique real de envio observado e correto em 4/10 candidaturas testadas na validação P0; nenhuma chegou a CONFIRMED ainda |
-| Gmail / Tracking | **PARADO — ação humana necessária** | `RefreshError` no OAuth a cada ~10 min, ininterrupto desde 22/08 (13 dias, >1800 falhas). Nenhuma resposta de recrutador está sendo detectada. Ver `KNOWN_ISSUES.md` |
-| Interview detection | **BLOQUEADO** | Depende do Gmail acima |
+| Gmail / Tracking | **OK (restaurado 05/09/2026)** | Reautorizado (ação humana) + 2 bugs de cota corrigidos (PRs #82, #83). Ciclo natural confirmado: `GOOGLE_MAIL_SCANNED, scanned: 30`. Revelou uma entrevista real sem resposta há 13 dias (Randstad/Mercado Livre) — aguardando decisão humana sobre a resposta, ver `KNOWN_ISSUES.md` |
+| Interview detection | **OK** | Já detectou 1 entrevista real (categoria `INTERVIEW`, confiança 98%) e múltiplas confirmações de candidatura reais |
 | Offer | **NÃO VALIDADO** | — |
 | Hiring | **NÃO VALIDADO** | — |
 

@@ -5,7 +5,7 @@ Objetivo único até novo aviso: **gerar a primeira entrevista rastreável gerad
 ## P0 — bloqueia "Operation Interview"
 
 - [x] **Corrigir o crash de memória (OOM) que derrubava 49% das candidaturas.** Cycle 001, PR #80 — medido: 0 crashes em lote real de 14 candidaturas pós-correção.
-- [ ] **Reautorizar o Gmail (ação humana, urgente).** `RefreshError` ininterrupto há 13 dias — nenhuma resposta de recrutador está sendo detectada. Rodar `scripts/authorize-google.py` com sessão humana disponível. Bloqueia toda medição de resposta/entrevista.
+- [x] **Reautorizar o Gmail.** Feito 04-05/09/2026 + 2 bugs de cota corrigidos (PRs #82, #83). Ciclo natural confirmado funcionando. Revelou 1 entrevista real sem resposta (Randstad/Mercado Livre) — decisão humana pendente, não é mais item de engenharia.
 - [ ] **Renovar sessão do InfoJobs** (login interativo humano + migração de perfil). Sem isso, o canal com mais candidatos score-alto testados hoje fica inutilizável.
 - [ ] **Levantar as 23 vagas do Catho de 13/08/2026** e excluí-las explicitamente de qualquer seleção futura, pra não repetir o risco de contaminação.
 - [ ] **Investigar `fill_known_fields` em ATS de terceiros não-semânticos** (Quickin confirmado; provavelmente outros). Sem isso, qualquer redirecionamento externo bem-sucedido termina em formulário vazio.
