@@ -1586,6 +1586,16 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
         finally:
             save_json(APPLICATIONS, applications)
             await sync_status_to_core(application)
+            stale_pages = list(browser.pages)
+            try:
+                page = await browser.new_page()
+            except Exception:
+                page = stale_pages[0] if stale_pages else page
+            for stale in stale_pages:
+                try:
+                    await stale.close()
+                except Exception:
+                    continue
     update(status="completed", message=f"Preparação concluída; {submitted} candidaturas enviadas.")
     event("APPLICATION_RUN_COMPLETED", submitted=submitted, inspected=len(pending))
 
