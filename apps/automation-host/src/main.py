@@ -1818,7 +1818,16 @@ async def google_mail_scheduler() -> None:
         if GOOGLE_TOKEN.exists():
             health = load_json(GOOGLE_HEALTH, {"consecutive_failures": 0, "last_success_at": None})
             try:
-                result = await asyncio.to_thread(scan_recruitment_mail, GOOGLE_TOKEN, GOOGLE_INBOX, 90, 250)
+                # Achado real: o ciclo agendado (a cada 10 minutos) escaneava
+                # sempre os últimos 90 dias/250 resultados - o mesmo custo de
+                # cota de um "catch-up" completo, pra sempre, mesmo quando
+                # não há e-mail novo nenhum. Resposta de recrutador é quase
+                # sempre recente; uma janela mais leve no ciclo rotineiro
+                # evita estourar a cota "Units per minute" do Gmail (o que já
+                # aconteceu de verdade: 13 dias sem nenhum scan bem-sucedido).
+                # O endpoint manual /google/scan continua com a janela funda
+                # (90/250) para um catch-up deliberado quando necessário.
+                result = await asyncio.to_thread(scan_recruitment_mail, GOOGLE_TOKEN, GOOGLE_INBOX, 7, 40)
                 event("GOOGLE_MAIL_SCANNED", scanned=result["scanned"], discovered=result["discovered"])
                 if health.get("consecutive_failures", 0) >= GOOGLE_HEALTH_ALERT_THRESHOLD:
                     event("GOOGLE_MAIL_RECOVERED", after_failures=health["consecutive_failures"])
