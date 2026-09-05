@@ -582,12 +582,16 @@ async def ensure_browser() -> BrowserContext:
     }
     if BROWSER_REMOTE_DEBUG_PORT:
         # Opt-in via env, nunca ligado por padrao: permite um humano se
-        # conectar via CDP (tunel SSH + ponte local) para completar um login
-        # que a automacao nao pode - ex.: parede de sessao do InfoJobs -
-        # sem precisar migrar/injetar cookies de outro perfil de navegador.
+        # conectar via CDP (tunel SSH + publish loopback-only no host) para
+        # completar um login que a automacao nao pode - ex.: parede de sessao
+        # do InfoJobs - sem precisar migrar/injetar cookies de outro perfil.
+        # 0.0.0.0 aqui e o bind DENTRO do container - um "docker -p" nunca
+        # alcanca um servico ligado so em 127.0.0.1 de outro namespace de
+        # rede; o isolamento real vem do publish 127.0.0.1-only no host
+        # (docker-compose.yml) + do tunel SSH, nao deste bind.
         launch_options["args"].extend([
             f"--remote-debugging-port={BROWSER_REMOTE_DEBUG_PORT}",
-            "--remote-debugging-address=127.0.0.1",
+            "--remote-debugging-address=0.0.0.0",
         ])
     if BROWSER_CHANNEL and BROWSER_CHANNEL != "chromium":
         launch_options["channel"] = BROWSER_CHANNEL
