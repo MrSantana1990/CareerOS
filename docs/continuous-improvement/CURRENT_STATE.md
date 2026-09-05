@@ -1,22 +1,23 @@
-# Estado real do funil — 04/09/2026
+# Estado real do funil — 05/09/2026
 
-Atualizado após o Cycle 001 (Operation Interview). Ver histórico da validação P0 (23-24/08) referenciado em `HELPSYSTEM-CONTINUIDADE.md`. Este arquivo reflete o que foi **comprovado com evidência real**, não o que foi desenhado em `V2-CAREER-INTELLIGENCE.md`.
+Atualizado após o Cycle 002 (Operation Interview). Ver histórico da validação P0 (23-24/08) referenciado em `HELPSYSTEM-CONTINUIDADE.md`. Este arquivo reflete o que foi **comprovado com evidência real**, não o que foi desenhado em `V2-CAREER-INTELLIGENCE.md`.
 
-## Baseline objetivo (produção real, 04/09/2026)
+## Baseline objetivo (produção real, 05/09/2026)
 
 | Métrica | Valor |
 |---|---|
 | Vagas descobertas (histórico) | 2.887 |
 | Vagas qualificadas (`APPROVED_AUTO`) | 693 |
 | Candidaturas totais | 693 |
-| Candidaturas `FAILED` | 533 (77%) |
-| Candidaturas `READY_FOR_REVIEW` | 69 |
-| Candidaturas `BLOCKED` | 63 |
-| Candidaturas `MANUAL_REQUIRED` | 13 |
-| Candidaturas `READY_TO_PREPARE` | 14 |
+| Candidaturas `FAILED` | 504 (72%, era 533/77% no Cycle 001) |
+| Candidaturas `READY_FOR_REVIEW` | 75 |
+| Candidaturas `BLOCKED` | 68 |
+| Candidaturas `MANUAL_REQUIRED` | 20 |
+| Candidaturas `READY_TO_PREPARE` | 17 |
+| Candidaturas `CLOSED` | 9 |
 | **Candidaturas `APPLIED` (confirmadas)** | **0** |
-| Respostas de recrutador | não mensurado (Gmail parado, ver abaixo) |
-| Entrevistas | não mensurado |
+| Respostas de recrutador | 1 entrevista real detectada (Randstad/Mercado Livre) + múltiplas confirmações de candidatura — Gmail restaurado no Cycle 001 |
+| Entrevistas | 1 detectada, aguardando resposta humana |
 | Ofertas | não mensurado |
 | Contratações | não mensurado |
 
