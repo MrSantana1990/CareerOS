@@ -849,8 +849,21 @@ async def inspect_application_queue(request: PrepareRequest) -> None:
         except Exception as exc:
             application["status"] = "FAILED"
             application["reason"] = f"Falha de inspeção: {type(exc).__name__}."
+            application["inspect_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+            event("APPLICATION_INSPECT_FAILED", application_id=application["id"],
+                  error=type(exc).__name__, detail=str(exc)[:200])
         indexed[url] = application
         save_json(APPLICATIONS, list(indexed.values()))
+        stale_pages = list(browser.pages)
+        try:
+            page = await browser.new_page()
+        except Exception:
+            page = stale_pages[0] if stale_pages else page
+        for stale in stale_pages:
+            try:
+                await stale.close()
+            except Exception:
+                continue
         event(
             "APPLICATION_INSPECTED",
             job_url=url,
