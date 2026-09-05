@@ -9,7 +9,9 @@ Objetivo único até novo aviso: **gerar a primeira entrevista rastreável gerad
 - [ ] **Renovar sessão do InfoJobs** (login interativo humano + migração de perfil). Sem isso, o canal com mais candidatos score-alto testados hoje fica inutilizável.
 - [ ] **Levantar as 23 vagas do Catho de 13/08/2026** e excluí-las explicitamente de qualquer seleção futura, pra não repetir o risco de contaminação.
 - [ ] **Investigar `fill_known_fields` em ATS de terceiros não-semânticos** (Quickin confirmado; provavelmente outros). Sem isso, qualquer redirecionamento externo bem-sucedido termina em formulário vazio.
-- [ ] **Investigar `LOCAL_AI_UNAVAILABLE`** — apareceu em 4 de 14 candidaturas do lote de validação do Cycle 001, gerando `UNKNOWN_FIELD`. Ainda não quantificado como gargalo, mas real e recorrente.
+- [x] **Corrigir o mesmo crash de memória (OOM) em `inspect_application_queue`.** Cycle 002, PR #85 — era 249/519 (48%) das candidaturas `FAILED`, sem diagnóstico algum. Medido: 15/15 vagas reprocessadas, 0 crashes, todas resolvidas em estado real (`CLOSED`/`BLOCKED`/`READY_TO_PREPARE`).
+- [x] **Investigar `LOCAL_AI_UNAVAILABLE`** — confirmado estrutural (nenhuma IA local rodando na VPS). Sistema já lida com segurança (nunca inventa resposta). Baixo volume (14 ocorrências) — não é o gargalo de maior impacto agora, decisão de implantar fica para quando isso for limitante de verdade.
+- [ ] **Reprocessar o backlog histórico de 248 candidaturas com `Page crashed` no preparo** (anteriores à correção do Cycle 001) — ainda sentadas em `FAILED`, não reprocessadas automaticamente ainda.
 - [ ] **Selecionar e validar 1 candidatura real de alta qualidade em canal já saudável** (LinkedIn, evitando Agibank) até CONFIRMED — ou até um novo limite externo genuíno, documentado como tal.
 
 ## P1 — necessário para "Operation Interview" produzir sinal, não só 1 evento
