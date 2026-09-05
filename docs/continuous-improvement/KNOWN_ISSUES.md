@@ -25,10 +25,12 @@ Consultar antes de investigar qualquer falha de candidatura real. Cada item tem 
 - **Não fazer:** tentar mais candidaturas reais no InfoJobs até isso ser resolvido — vai bater na mesma parede e gastar tentativas à toa.
 - **Próximo passo real:** login interativo humano + migração de perfil, mesmo procedimento já usado para LinkedIn e para a sessão original do Catho (documentado em `HELPSYSTEM-CONTINUIDADE.md`, seção 18).
 
-### Catho — contaminação de sessão real
-- **Sintoma:** o perfil de navegador migrado para a VPS carrega o histórico real de 23 candidaturas feitas em 13/08/2026 (local, antes desta automação). Qualquer uma dessas vagas específicas, se selecionada de novo, mostra "CV enviado!" antes de qualquer ação nova — risco real de falso-positivo de duplicação ou de atribuir uma confirmação a uma ação que não foi nossa.
-- **Não fazer:** selecionar candidato do Catho sem antes confirmar que não está entre as 23 de 13/08 (a lista exata ainda não foi levantada).
-- **Próximo passo real:** levantar a lista real dessas 23 vagas (via histórico do próprio site logado) antes de reutilizar este canal.
+### Catho — contaminação de sessão real (escopo ampliado, 05/09/2026)
+- **Sintoma:** o perfil de navegador migrado para a VPS carrega histórico real de candidaturas feitas fora desta automação. Originalmente identificado com 23 candidaturas de 13/08/2026, mas o Cycle 004 testou uma vaga **genuinamente nova** (publicada 27/08, descoberta em 05/09, nunca antes vista pelo sistema) e ela também mostrou "CV enviado!" pré-existente, mesmo com `filled_fields: []`/`submitted_at: null` no nosso registro.
+- **Conclusão atualizada: a contaminação não está limitada às 23 vagas de 13/08 — é mais ampla e imprevisível.** Trate qualquer candidato Catho como potencialmente já aplicado.
+- **Não fazer:** avançar para envio real em qualquer candidato Catho sem antes verificar visualmente (screenshot da etapa de preparo) que "CV enviado!" está ausente.
+- **Mitigação já em uso:** a verificação visual antes do envio real já pegou corretamente os 2 casos encontrados até agora (SQL Server DBA em 23/08, Analista de Dados II em 05/09) — nenhuma duplicação real ocorreu.
+- **Próximo passo real:** ainda não levantado — precisaria checar o histórico de candidaturas da própria conta Catho logada para mapear a extensão real da contaminação.
 
 ## Corrigido nesta sessão (23/08/2026) — regressão coberta por teste
 
