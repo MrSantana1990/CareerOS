@@ -53,6 +53,26 @@ def create_application_email_draft(token_path: Path, recipient: str, subject: st
     return {"draft_id": draft["id"]}
 
 
+def send_application_email(token_path: Path, recipient: str, subject: str, body: str,
+                           resume_path: Path) -> dict:
+    """Envio real (nao rascunho) de uma candidatura por e-mail - so deve ser
+    chamada a partir de uma acao humana explicita e pontual (um
+    application_id por vez), nunca em lote/automatico. CONFIRMED por
+    e-mail exige o message_id real devolvido aqui, nao so um draft_id."""
+    credentials = _credentials(token_path)
+    gmail = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+    message = EmailMessage()
+    message["To"] = recipient
+    message["Subject"] = subject
+    message.set_content(body)
+    subtype = "pdf" if resume_path.suffix.lower() == ".pdf" else "vnd.openxmlformats-officedocument.wordprocessingml.document"
+    message.add_attachment(resume_path.read_bytes(), maintype="application", subtype=subtype,
+                           filename=resume_path.name)
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    sent = gmail.users().messages().send(userId="me", body={"raw": raw}).execute()
+    return {"message_id": sent["id"], "thread_id": sent.get("threadId")}
+
+
 def send_security_code(token_path: Path, recipient: str, code: str) -> dict:
     credentials = _credentials(token_path)
     gmail = build("gmail", "v1", credentials=credentials, cache_discovery=False)

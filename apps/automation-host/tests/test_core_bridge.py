@@ -205,6 +205,32 @@ def test_build_job_record_maps_fields_for_core_job_input() -> None:
     assert record.attempts == 0
 
 
+def test_build_job_record_includes_recruiter_email_when_a_real_one_is_known() -> None:
+    # Cycle 009: o Core ja aceita recruiter_email/application_channel em
+    # POST /jobs e ja decide a estrategia EMAIL sozinho a partir deles -
+    # o gap real era esses dados nunca chegarem aqui.
+    record = build_job_record(
+        source="Catho", source_url="https://catho.com/vaga/1", company="Acme",
+        title="Analista de Dados", description="Descrição real", location="Campinas",
+        correlation_id="app-123", recruiter_email="rh@acme.com", recruiter_name="RH Acme",
+        application_channel="GREENHOUSE",
+    )
+    assert record.payload["recruiter_email"] == "rh@acme.com"
+    assert record.payload["recruiter_name"] == "RH Acme"
+    assert record.payload["application_channel"] == "GREENHOUSE"
+
+
+def test_build_job_record_omits_recruiter_fields_when_unknown() -> None:
+    record = build_job_record(
+        source="Catho", source_url="https://catho.com/vaga/1", company="Acme",
+        title="Analista de Dados", description="Descrição real", location="Campinas",
+        correlation_id="app-123",
+    )
+    assert "recruiter_email" not in record.payload
+    assert "recruiter_name" not in record.payload
+    assert "application_channel" not in record.payload
+
+
 def test_record_round_trips_through_dict_for_jsonl_outbox() -> None:
     record = build_job_record(
         source="LinkedIn", source_url="https://linkedin.com/jobs/9", company="Acme",
