@@ -10,14 +10,10 @@ def test_remote_debug_port_defaults_to_disabled() -> None:
     assert 'BROWSER_REMOTE_DEBUG_PORT = os.getenv("BROWSER_REMOTE_DEBUG_PORT", "").strip()' in source
 
 
-def test_remote_debug_port_is_gated_by_host_side_publish_not_container_bind() -> None:
-    # Docker "-p" nunca alcanca um servico ligado so em 127.0.0.1 de outro
-    # namespace de rede - o isolamento real precisa vir do publish
-    # loopback-only no host (docker-compose.yml) + do tunel SSH, entao o
-    # bind dentro do container e 0.0.0.0 de proposito.
+def test_remote_debug_port_only_binds_to_loopback_when_opted_in() -> None:
     source = _source()
     start = source.index("async def ensure_browser(")
     end = source.index("\nasync def", start + 1)
     body = source[start:end]
     assert "if BROWSER_REMOTE_DEBUG_PORT:" in body
-    assert '"--remote-debugging-address=0.0.0.0"' in body
+    assert '"--remote-debugging-address=127.0.0.1"' in body

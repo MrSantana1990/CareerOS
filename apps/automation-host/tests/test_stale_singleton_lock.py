@@ -8,7 +8,7 @@ def _source() -> str:
 def test_ensure_browser_clears_stale_singleton_locks_before_launch() -> None:
     source = _source()
     start = source.index("async def ensure_browser(")
-    body = source[start : start + 2200]
+    body = source[start : start + 1800]
     assert 'PROFILE.glob("Singleton*")' in body
     assert "stale_lock.unlink(missing_ok=True)" in body
     assert body.index('PROFILE.glob("Singleton*")') < body.index("launch_persistent_context")
