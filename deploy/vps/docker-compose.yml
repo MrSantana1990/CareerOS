@@ -116,13 +116,8 @@ services:
       EXECUTOR_ID: "vps-integrations"
       BROWSER_HEADLESS: "false"
       BROWSER_CHANNEL: "chrome"
-      BROWSER_REMOTE_DEBUG_PORT: "${BROWSER_REMOTE_DEBUG_PORT:-}"
       AUTO_APPLY_ENABLED: "false"
       DRY_RUN_ENABLED: "false"
-    ports:
-      # Loopback-only, so acessivel via tunel SSH deliberado - CDP so
-      # escuta de verdade quando BROWSER_REMOTE_DEBUG_PORT esta setado.
-      - "127.0.0.1:9222:9222"
     volumes:
       - integrations_data:/data/runtime
       - resume_data:/data/resumes:ro

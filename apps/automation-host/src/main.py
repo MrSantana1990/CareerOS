@@ -64,7 +64,6 @@ CAREER_ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 EXECUTOR_ID = os.getenv("EXECUTOR_ID", "local-browser")
 BROWSER_HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() in {"1", "true", "yes"}
 BROWSER_CHANNEL = os.getenv("BROWSER_CHANNEL", "chrome").strip().lower()
-BROWSER_REMOTE_DEBUG_PORT = os.getenv("BROWSER_REMOTE_DEBUG_PORT", "").strip()
 
 EXTERNAL_APPLY_CTA_PATTERN = (
     r"quero me candidatar|candidatura f[aá]cil|candidatar(?:-se)?|inscrever|"
@@ -580,19 +579,6 @@ async def ensure_browser() -> BrowserContext:
             "--js-flags=--max-old-space-size=256",
         ],
     }
-    if BROWSER_REMOTE_DEBUG_PORT:
-        # Opt-in via env, nunca ligado por padrao: permite um humano se
-        # conectar via CDP (tunel SSH + publish loopback-only no host) para
-        # completar um login que a automacao nao pode - ex.: parede de sessao
-        # do InfoJobs - sem precisar migrar/injetar cookies de outro perfil.
-        # 0.0.0.0 aqui e o bind DENTRO do container - um "docker -p" nunca
-        # alcanca um servico ligado so em 127.0.0.1 de outro namespace de
-        # rede; o isolamento real vem do publish 127.0.0.1-only no host
-        # (docker-compose.yml) + do tunel SSH, nao deste bind.
-        launch_options["args"].extend([
-            f"--remote-debugging-port={BROWSER_REMOTE_DEBUG_PORT}",
-            "--remote-debugging-address=0.0.0.0",
-        ])
     if BROWSER_CHANNEL and BROWSER_CHANNEL != "chromium":
         launch_options["channel"] = BROWSER_CHANNEL
     context = await playwright.chromium.launch_persistent_context(**launch_options)
