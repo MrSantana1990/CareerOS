@@ -97,8 +97,15 @@ async def report_intervention(application: dict[str, object], reason: str, title
         event("INTERVENTION_REPORT_SKIPPED", reason="missing_admin_token")
         return
     legacy_id = str(application.get("id", ""))
+    # Achado real (Cycle 006): application_id sempre ia None pro Core -
+    # nenhuma intervenção nunca ficava ligada ao registro real da
+    # candidatura, tornando impossível enriquecer a fila de ação humana
+    # com empresa/vaga/score sem abrir cada uma manualmente. Agora, quando
+    # o PREPARE já rodou no Core (core_application_id conhecido), a
+    # intervenção referencia o registro de verdade.
+    core_application_id = _load_core_sync_links().get(legacy_id, {}).get("core_application_id")
     payload = {
-        "application_id": None,
+        "application_id": core_application_id,
         "executor_id": EXECUTOR_ID,
         "reason": reason,
         "title": title,
@@ -107,6 +114,12 @@ async def report_intervention(application: dict[str, object], reason: str, title
         "evidence": {
             "legacy_application_id": legacy_id,
             "job_title": str(application.get("title", ""))[:240],
+            "source": str(application.get("source", "")),
+            "score": application.get("score"),
+            "region": str(application.get("region", "")),
+            "salary_brl": application.get("salary_brl"),
+            "job_url": str(application.get("job_url", ""))[:500],
+            "resume_version_id": application.get("core_resume_version_id"),
             "deduplication_key": f"{legacy_id}:{reason}",
             **(evidence or {}),
         },
