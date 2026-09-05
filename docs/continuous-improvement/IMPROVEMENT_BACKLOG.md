@@ -18,6 +18,8 @@ Objetivo único até novo aviso: **gerar a primeira entrevista rastreável gerad
 - [x] **Verificar se a parede de sessão do InfoJobs ainda está ativa.** Cycle 003 — **confirmado que sim** (mesma tela de login). Todos os candidatos de alto score já esgotaram o cap tentando automaticamente. Segue precisando de reautorização humana.
 - [x] **Auditar rotas de candidatura por e-mail/ATS/careers já existentes no código.** Cycle 004 — `detect_email_application`+`create_application_email_draft` existem e funcionam isoladamente, mas nada os conecta ainda. 0/41 vagas novas + 0 no histórico têm e-mail detectável — sem candidato real para validar a conexão ainda.
 - [x] **Rodar radar novo pequeno (TIER A) e verificar canais alternativos.** Cycle 004 — 41 vagas novas processadas com segurança, 0 canais ATS/e-mail encontrados, 5/5 LinkedIn e 2/2 Catho testados confirmam os mesmos 3 bloqueios já mapeados.
+- [x] **Vincular intervenções humanas (`human_interventions`) à candidatura real.** Cycle 006, PR #92 — `application_id` sempre ia `None`; 6/6 intervenções pendentes em produção estavam sem vínculo. Corrigido + enriquecido (`source`/`score`/`region`/`salary_brl`/`job_url`) e validado com uma intervenção real nova pós-fix.
+- [ ] **`unknown_fields` só guarda o nome do campo, não o texto da pergunta** (achado real, Cycle 006 — candidato Catho com 13 "killer questions" sem texto capturado). Mesmo com a fila enriquecida, o humano ainda precisa abrir a página pra saber o que responder.
 
 ## P1 — necessário para "Operation Interview" produzir sinal, não só 1 evento
 
