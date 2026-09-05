@@ -45,6 +45,11 @@ Consultar antes de investigar qualquer falha de candidatura real. Cada item tem 
 | `href="javascript:void(0)"` tratado como link navegável | [#79](https://github.com/MrSantana1990/CareerOS/pull/79) | `page.goto` com `net::ERR_ABORTED`, candidatura inteira terminava `FAILED` | Botão JS-driven sem link real — comum, provavelmente afeta outras vagas do InfoJobs |
 | Página do Chrome reaproveitada no lote inteiro causava OOM | [#80](https://github.com/MrSantana1990/CareerOS/pull/80) | 260/533 `FAILED` reais (49%) com `Page.goto: Page crashed`; confirmado no `dmesg` do host como OOM killer matando o Chrome, em quase toda execução agendada desde 24/08 | Uma única página reaproveitada para ~20 candidaturas seguidas sem nunca reciclar memória; corrigido e medido: lote de 14 candidaturas, 0 crashes |
 
+### Fila de ação humana — intervenções sem vínculo com a candidatura (RESOLVIDO, 05/09/2026)
+- **Sintoma:** `human_interventions` sempre chegava com `application_id` vazio (6/6 pendentes reais em produção confirmavam) — sem empresa/vaga/score visíveis sem abrir cada uma manualmente.
+- **Corrigido:** [PR #92](https://github.com/MrSantana1990/CareerOS/pull/92) — `report_intervention()` resolve `core_application_id` via `core-sync-links` e enriquece `evidence` com `source`/`score`/`region`/`salary_brl`/`job_url`/`resume_version_id`. Validado com uma intervenção real pós-deploy (evidência populada; `application_id` só fica vazio quando a candidatura nunca passou pelo PREPARE do Core — comportamento correto, não bug).
+- **Gap remanescente:** `unknown_fields` guarda só o nome do campo (ex.: `KillerQuestionAnswers[3].Answer`), não o texto da pergunta — o humano ainda precisa abrir a página. Ver `IMPROVEMENT_BACKLOG.md`.
+
 ## Aberto — gap de código, não testado ainda em produção real
 
 ### `fill_known_fields` não reconhece ATS de terceiros com HTML não-semântico
