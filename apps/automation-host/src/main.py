@@ -1544,6 +1544,32 @@ async def execute_application_queue(request: ExecuteRequest) -> None:
                         application["post_click_evidence"] = str(post_click_evidence)
                     except Exception:
                         pass
+                    # Achado real (Issue #73): um clique de candidatura externa às
+                    # vezes não produz navegação nenhuma porque a própria
+                    # plataforma aciona um reCAPTCHA invisível (sem nenhum texto
+                    # visível na página, então INTERVENTION_PATTERNS["CAPTCHA"]
+                    # nunca detectava isso) - o clique "funciona" tecnicamente,
+                    # mas a verificação anti-bot bloqueia a navegação real antes
+                    # de qualquer confirmação. Isso nunca deve ser contornado -
+                    # só reportado honestamente como o que realmente é.
+                    recaptcha_frame = next(
+                        (frame for frame in page.frames if "recaptcha" in frame.url.lower()), None,
+                    )
+                    if recaptcha_frame is not None:
+                        application["status"] = "MANUAL_REQUIRED"
+                        application["reason"] = (
+                            "Verificação anti-automação (reCAPTCHA) acionada pela plataforma durante "
+                            "o clique - o sistema nunca tenta contorná-la. Conclua manualmente."
+                        )
+                        remember_layout(application, "recaptcha_blocked_external_apply")
+                        await report_intervention(
+                            application, "CAPTCHA", "Verificação humana necessária",
+                            "A plataforma acionou uma verificação anti-automação (reCAPTCHA) ao clicar em "
+                            "candidatar-se. Abra a página e conclua manualmente - o sistema nunca tenta "
+                            "contorná-la.",
+                            page.url, {"post_click_url": page.url},
+                        )
+                        break
                     if await submission_confirmed(page, before_submit):
                         application["status"] = "APPLIED"
                         application["submitted_at"] = datetime.now(UTC).isoformat()
