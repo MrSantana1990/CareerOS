@@ -1,0 +1,107 @@
+name: Deploy VPS
+
+on:
+  workflow_run:
+    workflows: ["Qualidade"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 144.91.116.214
+          username: root
+          key: ${{ secrets.CAREEROS_DEPLOY_SSH_KEY }}
+          port: 22
+          command_timeout: 30m
+          script: |
+            set -e
+            trap 'echo "[ERRO] Falhou na linha $LINENO: $BASH_COMMAND" >&2' ERR
+            REPO_DIR="/opt/projetos/helpsystempro-carreira"
+            COMPOSE_DIR="$REPO_DIR/deploy/vps"
+            BACKUP_DIR="/opt/backups/helpsystempro-carreira"
+            SERVICES="postgres redis api integrations web"
+
+            cd "$REPO_DIR"
+            PRE_COMMIT=$(git rev-parse --short HEAD)
+
+            echo "[1/6] Backup pre-deploy do Postgres..."
+            mkdir -p "$BACKUP_DIR"
+            STAMP=$(date +%Y%m%d-%H%M%S)
+            DUMP_FILE="$BACKUP_DIR/carreira-pre-deploy-${STAMP}-${PRE_COMMIT}.dump"
+            docker exec helpsystem-carreira-postgres-1 pg_dump -U carreira -d carreira -F c > "$DUMP_FILE"
+            echo "[1/6] OK - $DUMP_FILE ($(du -h "$DUMP_FILE" | cut -f1))"
+
+            echo "[2/6] Atualizando repositorio..."
+            git fetch origin main
+            git reset --hard origin/main
+            NEW_COMMIT=$(git rev-parse --short HEAD)
+            echo "[2/6] OK - $PRE_COMMIT -> $NEW_COMMIT"
+
+            check_health() {
+              for name in $SERVICES; do
+                cid="helpsystem-carreira-${name}-1"
+                has_check=$(docker inspect --format '{{if .State.Health}}yes{{else}}no{{end}}' "$cid" 2>/dev/null) || return 1
+                if [ "$has_check" = "yes" ]; then
+                  status=$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null) || return 1
+                  [ "$status" = "healthy" ] || return 1
+                else
+                  running=$(docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null) || return 1
+                  [ "$running" = "true" ] || return 1
+                fi
+              done
+              return 0
+            }
+
+            rollback() {
+              echo "[ROLLBACK] Revertendo para $PRE_COMMIT..."
+              cd "$REPO_DIR"
+              git reset --hard "$PRE_COMMIT"
+              cd "$COMPOSE_DIR"
+              docker compose --env-file .env up -d --build --remove-orphans || true
+              echo "[ROLLBACK] Repositorio revertido para $PRE_COMMIT. Containers recolocados na versao anterior."
+              echo "[ROLLBACK] Restaurar dados se necessario a partir de $DUMP_FILE"
+            }
+
+            echo "[3/6] Construindo e subindo servicos..."
+            cd "$COMPOSE_DIR"
+            docker compose --env-file .env build
+            docker compose --env-file .env up -d --remove-orphans
+            echo "[3/6] OK"
+
+            echo "[4/6] Aguardando health checks (migrations do Postgres rodam no start do api)..."
+            healthy=0
+            for i in $(seq 1 30); do
+              if check_health; then
+                healthy=1
+                echo "[4/6] OK - todos os servicos saudaveis na tentativa $i"
+                break
+              fi
+              sleep 5
+            done
+
+            if [ "$healthy" != "1" ]; then
+              echo "[4/6] FALHA - servicos nao ficaram saudaveis a tempo"
+              docker compose --env-file .env ps
+              for name in $SERVICES; do
+                echo "--- logs: $name ---"
+                docker compose --env-file .env logs --tail=60 "$name" || true
+              done
+              rollback
+              exit 1
+            fi
+
+            echo "[5/6] Limpando backups com mais de 14 dias..."
+            find "$BACKUP_DIR" -maxdepth 1 -iname "carreira-pre-deploy-*" -mtime +14 -exec rm -f {} \;
+            echo "[5/6] OK"
+
+            echo "[6/6] DEPLOY COMPLETO - commit $NEW_COMMIT"
+            docker compose --env-file .env ps
