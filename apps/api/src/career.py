@@ -74,6 +74,14 @@ class ProfileInput(BaseModel):
     approved_answers: dict[str, str] = {}
 
 
+class CompanyIntelInput(BaseModel):
+    careers_url: str | None = Field(default=None, max_length=500)
+    ats_type: str | None = Field(default=None, max_length=40)
+    official_recruiting_email: str | None = Field(default=None, max_length=254)
+    talent_pool_url: str | None = Field(default=None, max_length=500)
+    br_presence: bool | None = None
+
+
 class JobInput(BaseModel):
     source: str = Field(min_length=2, max_length=80)
     external_id: str | None = Field(default=None, max_length=255)
@@ -563,6 +571,48 @@ async def list_jobs(limit: int = 100, slug: str = Depends(require_admin)) -> lis
     async with SessionLocal() as session:
         rows = (await session.execute(query, {"organization_id": org_id, "limit": min(max(limit, 1), 500)})).mappings()
     return [dict(row) for row in rows]
+
+
+@router.get("/companies")
+async def list_companies(limit: int = 100, slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    org_id = await organization_id(slug)
+    query = text("""
+        SELECT id, name, domain, careers_url, ats_type, official_recruiting_email,
+               talent_pool_url, br_presence, last_checked_at
+        FROM companies WHERE organization_id=:organization_id AND deleted_at IS NULL
+        ORDER BY name LIMIT :limit
+    """)
+    async with SessionLocal() as session:
+        rows = (await session.execute(query, {"organization_id": org_id, "limit": min(max(limit, 1), 500)})).mappings()
+    return [dict(row) for row in rows]
+
+
+@router.patch("/companies/{company_id}")
+async def update_company_intelligence(company_id: UUID, payload: CompanyIntelInput,
+                                       slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Company Intelligence (Cycle 009): registra o que foi resolvido de
+    verdade sobre uma empresa (careers/ATS/talent pool/e-mail oficial) -
+    nunca inventa o que nao foi encontrado; campos nao informados aqui
+    preservam o valor ja salvo (COALESCE), nunca voltam a null."""
+    org_id = await organization_id(slug)
+    values = payload.model_dump()
+    values.update({"organization_id": org_id, "company_id": company_id})
+    async with SessionLocal() as session:
+        updated_id = await session.scalar(text("""
+            UPDATE companies SET
+              careers_url = COALESCE(:careers_url, careers_url),
+              ats_type = COALESCE(:ats_type, ats_type),
+              official_recruiting_email = COALESCE(:official_recruiting_email, official_recruiting_email),
+              talent_pool_url = COALESCE(:talent_pool_url, talent_pool_url),
+              br_presence = COALESCE(:br_presence, br_presence),
+              last_checked_at = now()
+            WHERE id=:company_id AND organization_id=:organization_id AND deleted_at IS NULL
+            RETURNING id
+        """), values)
+        if not updated_id:
+            raise HTTPException(status_code=404, detail="Empresa não encontrada.")
+        await session.commit()
+    return {"id": updated_id, "updated": True}
 
 
 @router.post("/jobs/{job_id}/score")

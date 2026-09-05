@@ -32,7 +32,7 @@ from pypdf import PdfReader
 from .google_career import (connection_status, create_application_email_draft,
                             create_calendar_event, create_reply_draft,
                             mark_questionnaire_complete, scan_recruitment_mail,
-                            send_security_code)
+                            send_application_email, send_security_code)
 
 runtime_override = os.getenv("CAREER_RUNTIME")
 ROOT = Path(__file__).resolve().parents[3] if not runtime_override else Path("/app")
@@ -285,6 +285,16 @@ class ApplicationEmailDraftRequest(BaseModel):
     subject: str = Field(min_length=3, max_length=300)
     body: str = Field(min_length=10, max_length=10000)
     resume_path: str = Field(min_length=5, max_length=500)
+
+
+class ApplicationEmailSendRequest(BaseModel):
+    recipient: str = Field(min_length=5, max_length=254)
+    subject: str = Field(min_length=3, max_length=300)
+    body: str = Field(min_length=10, max_length=10000)
+    resume_path: str = Field(min_length=5, max_length=500)
+    # Sem default "true" de proposito: cada envio real precisa de uma
+    # chamada explicita com essa flag - nunca herdada de lote/agendador.
+    confirm_send: bool = False
 
 
 SKILL_CATALOG = [
@@ -748,6 +758,16 @@ async def sync_job_to_core(page: Page, job: dict, application: dict, body: str) 
     if not company:
         event("CORE_SYNC_SKIPPED_NO_COMPANY", job_url=job.get("url", ""))
         return
+    # Cycle 009: application["email_application"] ja vem preenchido por
+    # opportunity_feedback() (detect_email_application) quando roda antes
+    # desta chamada - so nunca era propagado pro Core, que ja sabe usar
+    # recruiter_email pra decidir a estrategia EMAIL sozinho. ATS detectado
+    # na propria URL da vaga vira application_channel pelo mesmo motivo -
+    # channel_score/application_strategy do Core ja reconhecem esses valores.
+    email_application = application.get("email_application") or {}
+    recruiter_email = str(email_application.get("email") or "").strip() or None
+    ats_match = detect_ats(page.url)
+    application_channel = ats_match.adapter.upper() if ats_match else None
     record = build_job_record(
         source=str(job.get("source", "")),
         source_url=str(job.get("url", "")),
@@ -756,6 +776,8 @@ async def sync_job_to_core(page: Page, job: dict, application: dict, body: str) 
         description=body[:12000],
         location=str(job.get("location_search", ""))[:200],
         correlation_id=application["id"],
+        recruiter_email=recruiter_email,
+        application_channel=application_channel,
     )
     enqueue_core_sync(record)
     event("CORE_SYNC_ENQUEUED", kind="JOB", correlation_id=application["id"],
@@ -2112,6 +2134,25 @@ async def google_application_draft(request: ApplicationEmailDraftRequest) -> dic
         return result
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Falha ao criar rascunho: {type(exc).__name__}") from exc
+
+
+@app.post("/google/application-send")
+async def google_application_send(request: ApplicationEmailSendRequest) -> dict:
+    """Envio real e confirmado (nao rascunho) - CONFIRMED por e-mail exige
+    o message_id devolvido aqui. confirm_send precisa vir true
+    explicitamente em cada chamada; nunca chamado automaticamente."""
+    if not request.confirm_send:
+        raise HTTPException(status_code=400, detail="confirm_send precisa ser true para um envio real.")
+    source = Path(request.resume_path).resolve()
+    if not source.is_relative_to(RESUME_STORAGE) or not source.is_file():
+        raise HTTPException(status_code=400, detail="Currículo aprovado não localizado.")
+    try:
+        result = await asyncio.to_thread(send_application_email, GOOGLE_TOKEN,
+                                         request.recipient, request.subject, request.body, source)
+        event("APPLICATION_EMAIL_SENT", message_id=result["message_id"])
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao enviar e-mail: {type(exc).__name__}") from exc
 
 
 @app.post("/google/calendar")

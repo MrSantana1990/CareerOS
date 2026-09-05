@@ -111,7 +111,9 @@ def job_idempotency_key(source: str, source_url: str) -> str:
 
 
 def build_job_record(*, source: str, source_url: str, company: str, title: str,
-                      description: str, location: str, correlation_id: str) -> CoreSyncRecord:
+                      description: str, location: str, correlation_id: str,
+                      recruiter_email: str | None = None, recruiter_name: str | None = None,
+                      application_channel: str | None = None) -> CoreSyncRecord:
     payload = {
         "source": source,
         "source_url": source_url,
@@ -120,6 +122,17 @@ def build_job_record(*, source: str, source_url: str, company: str, title: str,
         "description": description,
         "location": location or None,
     }
+    # Cycle 009: o Core ja aceita recruiter_email/application_channel em
+    # POST /jobs (career.py JobInput) e ja usa recruiter_email pra decidir
+    # a estrategia EMAIL em application_strategy() - so nunca chegava
+    # nada aqui. Sem isso, detect_email_application/detect_ats descobriam
+    # a informacao real e ela morria num campo so informativo local.
+    if recruiter_email:
+        payload["recruiter_email"] = recruiter_email
+    if recruiter_name:
+        payload["recruiter_name"] = recruiter_name
+    if application_channel:
+        payload["application_channel"] = application_channel
     return CoreSyncRecord(
         kind="JOB",
         payload=payload,
