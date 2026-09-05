@@ -116,7 +116,6 @@ services:
       EXECUTOR_ID: "vps-integrations"
       BROWSER_HEADLESS: "false"
       BROWSER_CHANNEL: "chrome"
-      BROWSER_REMOTE_DEBUG_PORT: "${BROWSER_REMOTE_DEBUG_PORT:-}"
       AUTO_APPLY_ENABLED: "false"
       DRY_RUN_ENABLED: "false"
     volumes:
