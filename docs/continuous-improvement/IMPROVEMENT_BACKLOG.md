@@ -7,7 +7,7 @@ Objetivo único até novo aviso: **gerar a primeira entrevista rastreável gerad
 - [x] **Corrigir o crash de memória (OOM) que derrubava 49% das candidaturas.** Cycle 001, PR #80 — medido: 0 crashes em lote real de 14 candidaturas pós-correção.
 - [x] **Reautorizar o Gmail.** Feito 04-05/09/2026 + 2 bugs de cota corrigidos (PRs #82, #83). Ciclo natural confirmado funcionando. Revelou 1 entrevista real sem resposta (Randstad/Mercado Livre) — decisão humana pendente, não é mais item de engenharia.
 - [ ] **Renovar sessão do InfoJobs** (login interativo humano + migração de perfil). Sem isso, o canal com mais candidatos score-alto testados hoje fica inutilizável.
-- [ ] **Levantar as 23 vagas do Catho de 13/08/2026** e excluí-las explicitamente de qualquer seleção futura, pra não repetir o risco de contaminação.
+- [ ] **Contaminação do Catho — escopo ampliado (Cycle 004).** Não são só as 23 vagas de 13/08: uma vaga genuinamente nova (05/09) também mostrou "CV enviado!" pré-existente. Mitigação em uso (verificação visual antes de qualquer envio real) está funcionando, mas a causa raiz completa ainda não foi mapeada.
 - [ ] **Investigar `fill_known_fields` em ATS de terceiros não-semânticos** (Quickin confirmado; provavelmente outros). Sem isso, qualquer redirecionamento externo bem-sucedido termina em formulário vazio.
 - [x] **Corrigir o mesmo crash de memória (OOM) em `inspect_application_queue`.** Cycle 002, PR #85 — era 249/519 (48%) das candidaturas `FAILED`, sem diagnóstico algum. Medido: 15/15 vagas reprocessadas, 0 crashes, todas resolvidas em estado real (`CLOSED`/`BLOCKED`/`READY_TO_PREPARE`).
 - [x] **Investigar `LOCAL_AI_UNAVAILABLE`** — confirmado estrutural (nenhuma IA local rodando na VPS). Sistema já lida com segurança (nunca inventa resposta). Baixo volume (14 ocorrências) — não é o gargalo de maior impacto agora, decisão de implantar fica para quando isso for limitante de verdade.
@@ -16,6 +16,8 @@ Objetivo único até novo aviso: **gerar a primeira entrevista rastreável gerad
 - [x] **Selecionar e validar 1 candidatura real de alta qualidade em canal já saudável até CONFIRMED.** Cycle 003 — tentado (Atento/LinkedIn, pipeline completo validado), mas bateu no mesmo mistério do Issue #73 (clique externo sem navegação). **Não é mais caso isolado do Agibank — confirmado recorrente.**
 - [ ] **Diagnóstico real do Issue #73** (mecanismo de redirecionamento externo do LinkedIn) — agora o gargalo mais claramente dominante para CONFIRMED. Escopo aberto/incerto (CDP remoto ou sessão manual). Adiado por decisão consciente no Cycle 003 (menor risco: pivotar pra outros canais primeiro).
 - [x] **Verificar se a parede de sessão do InfoJobs ainda está ativa.** Cycle 003 — **confirmado que sim** (mesma tela de login). Todos os candidatos de alto score já esgotaram o cap tentando automaticamente. Segue precisando de reautorização humana.
+- [x] **Auditar rotas de candidatura por e-mail/ATS/careers já existentes no código.** Cycle 004 — `detect_email_application`+`create_application_email_draft` existem e funcionam isoladamente, mas nada os conecta ainda. 0/41 vagas novas + 0 no histórico têm e-mail detectável — sem candidato real para validar a conexão ainda.
+- [x] **Rodar radar novo pequeno (TIER A) e verificar canais alternativos.** Cycle 004 — 41 vagas novas processadas com segurança, 0 canais ATS/e-mail encontrados, 5/5 LinkedIn e 2/2 Catho testados confirmam os mesmos 3 bloqueios já mapeados.
 
 ## P1 — necessário para "Operation Interview" produzir sinal, não só 1 evento
 
