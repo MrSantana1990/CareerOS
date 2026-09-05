@@ -11,12 +11,13 @@ Consultar antes de investigar qualquer falha de candidatura real. Cada item tem 
 - **Camada 2 (bug de código, achado só depois da camada 1):** mesmo com token válido, o scan continuava falhando com `HttpError 403 rateLimitExceeded` ("Quota exceeded... Units per minute per user"). Causa raiz real: (a) toda rodada de 10 em 10 minutos buscava o corpo completo de TODAS as ~350 mensagens do período de 90 dias, mesmo as já classificadas antes; (b) o ciclo rotineiro usava os mesmos parâmetros caros de um catch-up completo (90 dias/250 resultados) pra sempre. Corrigido em dois PRs: [#82](https://github.com/MrSantana1990/CareerOS/pull/82) (não reprocessar mensagem já classificada + retry com backoff) e [#83](https://github.com/MrSantana1990/CareerOS/pull/83) (ciclo rotineiro usa janela leve de 7 dias/40 resultados; `/google/scan` manual mantém a janela funda de 90d/250 para catch-up deliberado).
 - **Validar:** próximo ciclo agendado (10 min) deve gerar `GOOGLE_MAIL_SCANNED` sem `HttpError`.
 
-### LinkedIn/Agibank — clique sem navegação observável
-- **Aplicação:** `ce0370a8-2c1d-45f5-9e1a-4fa7ea89052d`, `attempts=3` (cap atingido, não tocar novamente).
-- **Sintoma:** o clique no CTA final não produz nenhuma nova aba, mudança de domínio, nem qualquer efeito observável — reproduzido em 3 tentativas distintas, cada uma após uma correção diferente ter descartado a hipótese anterior.
-- **Rastreamento:** [Issue #73](https://github.com/MrSantana1990/CareerOS/issues/73).
-- **Não fazer:** resetar `attempts`, aumentar retry, ou tratar qualquer clique nessa vaga como confirmação.
-- **Próximo passo real:** diagnóstico via CDP remoto ou sessão WSL manual, evitando disputar o lock do perfil do navegador com o servidor ativo.
+### LinkedIn External Apply — reCAPTCHA invisível (RESOLVIDO tecnicamente, 05/09/2026)
+- **Aplicação original:** `ce0370a8-2c1d-45f5-9e1a-4fa7ea89052d` (Agibank), `attempts=3` (cap atingido, não tocar novamente).
+- **Causa raiz identificada (Cycle 005):** a plataforma aciona um reCAPTCHA Enterprise invisível (bot-detection, `li.protechts.net/...&uc=scraping&...`) no momento do clique em "Candidatar-se no site da empresa" — nunca resolvido, bloqueando a navegação externa sem lançar erro algum. Confirmado via diagnóstico isolado (perfil clonado, sem risco à produção) reproduzido contra vaga real (Evertec Brasil).
+- **Corrigido:** [PR #90](https://github.com/MrSantana1990/CareerOS/pull/90) — detecta iframe de reCAPTCHA via `page.frames()` e reporta honestamente como `CAPTCHA`/`MANUAL_REQUIRED`, em vez da mensagem genérica anterior. Validado em produção real (mesmo candidato, mesmo clique, motivo agora preciso).
+- **Rastreamento:** [Issue #73](https://github.com/MrSantana1990/CareerOS/issues/73) — causa raiz registrada, recomendado fechar.
+- **Não fazer:** tentar contornar o reCAPTCHA — é uma barreira legítima da plataforma, por princípio do produto. Não resetar `attempts` do Agibank.
+- **Limitação de negócio que permanece:** candidaturas 100% automatizadas via LinkedIn External Apply continuam bloqueadas quando a plataforma decide desafiar a sessão — agora corretamente diagnosticado como `MANUAL_REQUIRED`/CAPTCHA, viabilizando uma "Candidatura Assistida" real (humano completa o passo apontado com precisão).
 
 ### InfoJobs — parede de sessão sistêmica
 - **Sintoma:** duas vagas distintas (Manpower Staffing, Luandre Serviços Temporários), mesmo com 15 cookies válidos no perfil, redirecionaram para a tela de login do InfoJobs ("Acesso para usuários", "O e-mail é obrigatório") em vez do formulário de candidatura.
