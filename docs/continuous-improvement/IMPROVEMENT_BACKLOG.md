@@ -12,7 +12,10 @@ Objetivo único até novo aviso: **gerar a primeira entrevista rastreável gerad
 - [x] **Corrigir o mesmo crash de memória (OOM) em `inspect_application_queue`.** Cycle 002, PR #85 — era 249/519 (48%) das candidaturas `FAILED`, sem diagnóstico algum. Medido: 15/15 vagas reprocessadas, 0 crashes, todas resolvidas em estado real (`CLOSED`/`BLOCKED`/`READY_TO_PREPARE`).
 - [x] **Investigar `LOCAL_AI_UNAVAILABLE`** — confirmado estrutural (nenhuma IA local rodando na VPS). Sistema já lida com segurança (nunca inventa resposta). Baixo volume (14 ocorrências) — não é o gargalo de maior impacto agora, decisão de implantar fica para quando isso for limitante de verdade.
 - [ ] **Reprocessar o backlog histórico de 248 candidaturas com `Page crashed` no preparo** (anteriores à correção do Cycle 001) — ainda sentadas em `FAILED`, não reprocessadas automaticamente ainda.
-- [ ] **Selecionar e validar 1 candidatura real de alta qualidade em canal já saudável** (LinkedIn, evitando Agibank) até CONFIRMED — ou até um novo limite externo genuíno, documentado como tal.
+- [x] **Corrigir relocation implícito** (vaga presencial no exterior sem a palavra "relocation"). Cycle 003, PR #87 — testado e validado em produção real.
+- [x] **Selecionar e validar 1 candidatura real de alta qualidade em canal já saudável até CONFIRMED.** Cycle 003 — tentado (Atento/LinkedIn, pipeline completo validado), mas bateu no mesmo mistério do Issue #73 (clique externo sem navegação). **Não é mais caso isolado do Agibank — confirmado recorrente.**
+- [ ] **Diagnóstico real do Issue #73** (mecanismo de redirecionamento externo do LinkedIn) — agora o gargalo mais claramente dominante para CONFIRMED. Escopo aberto/incerto (CDP remoto ou sessão manual). Adiado por decisão consciente no Cycle 003 (menor risco: pivotar pra outros canais primeiro).
+- [x] **Verificar se a parede de sessão do InfoJobs ainda está ativa.** Cycle 003 — **confirmado que sim** (mesma tela de login). Todos os candidatos de alto score já esgotaram o cap tentando automaticamente. Segue precisando de reautorização humana.
 
 ## P1 — necessário para "Operation Interview" produzir sinal, não só 1 evento
 
