@@ -18,6 +18,11 @@ import re
 
 SUPPORT_N1_MINIMUM_SALARY = 4000
 
+# SCORE != ELIGIBILITY: piso definido explicitamente pelo candidato - uma
+# vaga abaixo disso e BLOCK independente de quao alto o score tecnico for,
+# em qualquer familia de vaga (nao so suporte/N1).
+MINIMUM_ACCEPTABLE_SALARY_BRL = 4000
+
 
 @dataclass(frozen=True)
 class HardBlockResult:
@@ -71,6 +76,9 @@ def assess_hard_blocks(text: str, salary_brl: int | None, foreign_country: bool 
 
     if _SUPPORT_N1.search(text) and salary_brl is not None and salary_brl < SUPPORT_N1_MINIMUM_SALARY:
         blocks.append("SUPPORT_N1_MINIMUM")
+
+    if salary_brl is not None and salary_brl < MINIMUM_ACCEPTABLE_SALARY_BRL:
+        blocks.append("MINIMUM_SALARY_BLOCK")
 
     if _ENGLISH.search(text) and _FLUENT_LEVEL.search(text):
         risks.append("ENGLISH_C1_REVIEW")
