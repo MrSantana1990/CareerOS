@@ -73,3 +73,37 @@ def test_clean_job_has_no_blocks_or_risks() -> None:
     result = assess_hard_blocks("vaga remota de analista de dados pleno, português fluente", 8000)
     assert result.blocks == []
     assert result.risks == []
+
+
+def test_foreign_presencial_job_without_the_word_relocation_still_blocks() -> None:
+    # Achado real em produção: uma vaga presencial em Seiça, Portugal
+    # (Caxamar) nunca usava as palavras "relocation"/"mudança obrigatória"
+    # - só descrevia o local físico de trabalho - e passava pelo gate sem
+    # nenhum bloqueio, apesar de exigir relocation de fato para um
+    # candidato do Brasil.
+    result = assess_hard_blocks(
+        "analista de sistemas erp presencial em seiça, santarém, horário 09h-18h", None,
+        foreign_country=True,
+    )
+    assert "RELOCATION_REQUIRED" in result.blocks
+
+
+def test_foreign_job_with_remote_marker_does_not_block() -> None:
+    result = assess_hard_blocks(
+        "dba oracle 100% remoto, projetos em portugal", None,
+        foreign_country=True,
+    )
+    assert "RELOCATION_REQUIRED" not in result.blocks
+
+
+def test_foreign_job_with_hybrid_marker_does_not_block() -> None:
+    result = assess_hard_blocks(
+        "vaga híbrida em lisboa, dois dias por semana no escritório", None,
+        foreign_country=True,
+    )
+    assert "RELOCATION_REQUIRED" not in result.blocks
+
+
+def test_domestic_presencial_job_is_unaffected_by_the_new_rule() -> None:
+    result = assess_hard_blocks("vaga presencial em são paulo", None, foreign_country=False)
+    assert "RELOCATION_REQUIRED" not in result.blocks

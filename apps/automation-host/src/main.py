@@ -468,7 +468,7 @@ def opportunity_feedback(title: str, body: str, settings: AutomationSettings) ->
     else:
         recommendation = "STANDARD"
         reason = "Avaliar aderência técnica, modalidade, benefícios e remuneração em conjunto."
-    hard_block_result = assess_hard_blocks(text, salary)
+    hard_block_result = assess_hard_blocks(text, salary, foreign_country=(region == "Portugal"))
     if hard_block_result.risks:
         reason += f" Atenção: {', '.join(hard_block_result.risks)}."
     email_instruction = detect_email_application(f"{title} {body}")

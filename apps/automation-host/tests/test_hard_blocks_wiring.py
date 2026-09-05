@@ -9,7 +9,7 @@ def test_opportunity_feedback_uses_shared_hard_blocks_module() -> None:
     source = _source()
     assert "from .hard_blocks import assess_hard_blocks, extract_salary_brl" in source
     assert "def extract_salary_brl(" not in source  # nao deve mais existir cópia local
-    assert "hard_block_result = assess_hard_blocks(text, salary)" in source
+    assert 'hard_block_result = assess_hard_blocks(text, salary, foreign_country=(region == "Portugal"))' in source
     assert '"blocks": hard_block_result.blocks,' in source
     assert '"risks": hard_block_result.risks,' in source
 

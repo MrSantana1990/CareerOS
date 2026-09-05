@@ -38,6 +38,7 @@ _RELOCATION_EN = re.compile(r"relocat", re.IGNORECASE)
 _REQUIRED_EN = re.compile(r"\brequired\b", re.IGNORECASE)
 _RELOCATION_PT = re.compile(r"mudan[çc]a", re.IGNORECASE)
 _OBRIGATORIO_PT = re.compile(r"obrigat[oó]ri", re.IGNORECASE)
+_REMOTE_MARKERS = re.compile(r"remoto|remote|home.?office|h[ií]brid|hybrid", re.IGNORECASE)
 
 _SPANISH = re.compile(r"espanhol|spanish", re.IGNORECASE)
 _ENGLISH = re.compile(r"ingl[eê]s|english", re.IGNORECASE)
@@ -48,13 +49,21 @@ _FLUENT_LEVEL = re.compile(
 _SUPPORT_N1 = re.compile(r"\bn1\b|suporte n1|n[ií]vel\s*1\b", re.IGNORECASE)
 
 
-def assess_hard_blocks(text: str, salary_brl: int | None) -> HardBlockResult:
+def assess_hard_blocks(text: str, salary_brl: int | None, foreign_country: bool = False) -> HardBlockResult:
     blocks: list[str] = []
     risks: list[str] = []
 
     if (_RELOCATION_EN.search(text) and _REQUIRED_EN.search(text)) or (
         _RELOCATION_PT.search(text) and _OBRIGATORIO_PT.search(text)
     ):
+        blocks.append("RELOCATION_REQUIRED")
+    elif foreign_country and not _REMOTE_MARKERS.search(text):
+        # Achado real: a maioria das vagas presenciais no exterior nunca usa
+        # literalmente "relocation"/"mudança obrigatória" - só descreve o
+        # local de trabalho físico e assume que fica implícito. Uma vaga
+        # detectada num país estrangeiro que também não menciona nenhum
+        # sinal de remoto/híbrido é, na prática, relocation obrigatório
+        # pra um candidato do Brasil, mesmo sem a palavra-chave exata.
         blocks.append("RELOCATION_REQUIRED")
 
     if _SPANISH.search(text) and _FLUENT_LEVEL.search(text):
