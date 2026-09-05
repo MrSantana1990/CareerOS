@@ -1,0 +1,21 @@
+{
+  "_comment": "Amostra real capturada em 05/09/2026 (Cycle 007) para uma vaga real do Catho (Analista Sênior de Dados, IA e Automação, Sfera Multifranquias, Rio de Janeiro). A candidatura foi marcada DROPPED (RELOCATION_REQUIRED - candidato em Campinas/SP, vaga presencial no Rio) por decisão explícita do usuário. Estas perguntas NUNCA foram respondidas - preservadas só como evidência/teste para um futuro Human Action classifier (AUTO_ANSWERABLE / USER_REQUIRED / BLOCKING).",
+  "source": "Catho",
+  "job_title": "Analista Sênior de Dados, IA e Automação Centro (RJ)",
+  "company": "Sfera Multifranquias",
+  "questions": [
+    {"text": "Você possui experiência em organização, triagem e priorização de demandas entre áreas de negócio e times técnicos?", "type": "boolean", "classification": "USER_REQUIRED"},
+    {"text": "Número de celular com DDD", "type": "text", "classification": "AUTO_ANSWERABLE", "evidence": "candidate_profiles.approved_answers.celular"},
+    {"text": "E-mail atualizado", "type": "text", "classification": "AUTO_ANSWERABLE", "evidence": "candidate_profiles.approved_answers.e-mail"},
+    {"text": "Como você ficou sabendo da oportunidade?", "type": "choice", "classification": "AUTO_ANSWERABLE", "evidence": "pergunta de baixo risco, sem reivindicação de qualificação"},
+    {"text": "Você já utilizou IA para construir prompts, automatizar atividades ou apoiar melhorias de processo?", "type": "boolean", "classification": "USER_REQUIRED"},
+    {"text": "Qual a sua pretensão salarial?", "type": "text", "classification": "USER_REQUIRED", "evidence": "candidate_profiles.salary_expectation esta vazio"},
+    {"text": "Qual o seu nível de conhecimento em automação de processos e uso de IA no dia a dia corporativo?", "type": "choice", "classification": "USER_REQUIRED"},
+    {"text": "Qual o seu nível de conhecimento em BI, dashboards e análise de indicadores?", "type": "choice", "classification": "USER_REQUIRED"},
+    {"text": "Em que bairro/município você reside?", "type": "text", "classification": "AUTO_ANSWERABLE", "evidence": "candidate_profiles.city = Campinas"},
+    {"text": "Você possui conhecimento em desenvolvimento ou lógica de construção de soluções, mesmo sem atuação principal como desenvolvedor(a)? Descreva", "type": "free_text", "classification": "USER_REQUIRED"},
+    {"text": "CPF", "type": "text", "classification": "USER_REQUIRED", "evidence": "PII sensivel - nunca auto-preencher independente de disponibilidade"},
+    {"text": "Você já atuou como ponto focal ou referência na organização de demandas, definição de prioridades e direcionamento de entregas?", "type": "boolean", "classification": "USER_REQUIRED"},
+    {"text": "Você possui ensino superior completo em áreas correlatas a tecnologia, dados ou sistemas?", "type": "boolean", "classification": "USER_REQUIRED"}
+  ]
+}
