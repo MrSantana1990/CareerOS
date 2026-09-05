@@ -9,6 +9,11 @@ import unicodedata
 from urllib.parse import urlparse
 
 
+# SCORE != ELIGIBILITY: piso definido explicitamente pelo candidato - uma
+# vaga abaixo disso e BLOCK independente de quao alto o score tecnico for.
+MINIMUM_ACCEPTABLE_SALARY_BRL = 4000
+
+
 def normalize(value: str) -> str:
     plain = unicodedata.normalize("NFKD", value or "").encode("ascii", "ignore").decode()
     return " ".join(re.sub(r"[^a-z0-9]+", " ", plain.lower()).split())
@@ -84,7 +89,7 @@ def match_radars(job: dict, radars: list[dict]) -> list[str]:
 
 
 def score_job(job: dict, profile: dict, enabled_rules: set[str] | None = None) -> ScoreResult:
-    enabled = enabled_rules or {"GUPY_BLOCK", "SPANISH_FLUENT_BLOCK", "ENGLISH_C1_REVIEW", "SUPPORT_N1_MINIMUM"}
+    enabled = enabled_rules or {"GUPY_BLOCK", "SPANISH_FLUENT_BLOCK", "ENGLISH_C1_REVIEW", "SUPPORT_N1_MINIMUM", "MINIMUM_SALARY_BLOCK"}
     text = normalize(" ".join(str(job.get(key) or "") for key in ("title", "description", "location")))
     source = normalize(str(job.get("source") or ""))
     domain = normalize(urlparse(str(job.get("canonical_url") or job.get("source_url") or "")).netloc)
@@ -112,6 +117,8 @@ def score_job(job: dict, profile: dict, enabled_rules: set[str] | None = None) -
     salary_min = float(job.get("salary_min") or 0)
     if "SUPPORT_N1_MINIMUM" in enabled and normalize(str(job.get("family") or "")) == "support" and seniority in {"n1", "junior"} and salary_min and salary_min < 4000:
         blocks.append("SUPPORT_N1_MINIMUM")
+    if "MINIMUM_SALARY_BLOCK" in enabled and salary_min and salary_min < MINIMUM_ACCEPTABLE_SALARY_BRL:
+        blocks.append("MINIMUM_SALARY_BLOCK")
     expected = float(profile.get("salary_expectation_numeric") or 0)
     compensation = 10 if not salary_min or not expected or salary_min >= expected else max(0, round(10 * salary_min / expected))
     location = normalize(str(job.get("location") or ""))

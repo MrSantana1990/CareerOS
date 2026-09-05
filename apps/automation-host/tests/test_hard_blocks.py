@@ -107,3 +107,20 @@ def test_foreign_job_with_hybrid_marker_does_not_block() -> None:
 def test_domestic_presencial_job_is_unaffected_by_the_new_rule() -> None:
     result = assess_hard_blocks("vaga presencial em são paulo", None, foreign_country=False)
     assert "RELOCATION_REQUIRED" not in result.blocks
+
+
+def test_salary_below_minimum_blocks_regardless_of_role_family() -> None:
+    # SCORE != ELIGIBILITY: uma vaga de qualquer familia abaixo do piso
+    # aceitavel e BLOCK, mesmo com aderencia tecnica perfeita.
+    result = assess_hard_blocks("vaga remota de analista de dados pleno, aderência técnica perfeita", 1500)
+    assert "MINIMUM_SALARY_BLOCK" in result.blocks
+
+
+def test_salary_at_minimum_does_not_block() -> None:
+    result = assess_hard_blocks("vaga remota de analista de dados pleno", 4000)
+    assert "MINIMUM_SALARY_BLOCK" not in result.blocks
+
+
+def test_unknown_salary_does_not_trigger_minimum_salary_block() -> None:
+    result = assess_hard_blocks("vaga remota de analista de dados pleno, sem faixa salarial informada", None)
+    assert "MINIMUM_SALARY_BLOCK" not in result.blocks

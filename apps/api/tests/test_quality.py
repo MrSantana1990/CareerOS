@@ -18,6 +18,36 @@ def test_score_is_explainable_and_qualified():
     assert result.dimensions["technology"] == 30
 
 
+def test_minimum_salary_blocks_regardless_of_score():
+    # SCORE != ELIGIBILITY: mesmo com aderencia tecnica perfeita, uma vaga
+    # abaixo do piso salarial aceitavel e BLOCK, em qualquer familia de vaga.
+    result = score_job(
+        {"title": "DBA Senior", "required_skills": ["SQL Server"], "work_model": "REMOTE",
+         "seniority": "SENIOR", "salary_min": 1500, "family": "data"},
+        {"verified_skills": ["SQL Server"], "target_roles": ["DBA Senior"], "work_models": ["REMOTE"]},
+    )
+    assert result.recommendation == "BLOCK"
+    assert "MINIMUM_SALARY_BLOCK" in result.blocking_rules
+
+
+def test_salary_at_minimum_does_not_trigger_minimum_salary_block():
+    result = score_job(
+        {"title": "DBA Senior", "required_skills": ["SQL Server"], "work_model": "REMOTE",
+         "seniority": "SENIOR", "salary_min": 4000, "family": "data"},
+        {"verified_skills": ["SQL Server"], "target_roles": ["DBA Senior"], "work_models": ["REMOTE"]},
+    )
+    assert "MINIMUM_SALARY_BLOCK" not in result.blocking_rules
+
+
+def test_unknown_salary_does_not_trigger_minimum_salary_block():
+    result = score_job(
+        {"title": "DBA Senior", "required_skills": ["SQL Server"], "work_model": "REMOTE",
+         "seniority": "SENIOR", "family": "data"},
+        {"verified_skills": ["SQL Server"], "target_roles": ["DBA Senior"], "work_models": ["REMOTE"]},
+    )
+    assert "MINIMUM_SALARY_BLOCK" not in result.blocking_rules
+
+
 def test_state_machine_rejects_unsafe_jump():
     assert transition_allowed("DISCOVERED", "VALIDATING")
     assert not transition_allowed("DISCOVERED", "CONFIRMED")
