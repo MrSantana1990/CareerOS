@@ -4,6 +4,14 @@ Consultar antes de investigar qualquer falha de candidatura real. Cada item tem 
 
 ## Aberto — requer participação humana
 
+### InfoJobs — parede de sessão (segue aberto, 06/09/2026)
+- Tentativa de ponte remota via CDP (Chrome DevTools Protocol) para permitir login humano direto no navegador de produção foi **revertida por completo** (Cycle 007, PRs #95–#99) — a proteção de segurança do próprio ambiente sinalizou corretamente um relay TCP genérico como ferramenta dual-use, e a decisão do usuário foi não contornar/flexibilizar essa proteção. Nenhum código relacionado permanece no produto.
+- **Não fazer:** reabrir a abordagem CDP/relay genérico. Buscar uma via suportada (login direto do usuário + handoff de credencial adequado, não um bridge genérico).
+- Segue `AUTH_REQUIRED` — candidato de maior score (99, InfoJobs) permanece pronto, esperando só esta ação.
+
+### LinkedIn External Apply — reCAPTCHA, 2 candidatos reais no cap (06/09/2026)
+- Duas tentativas reais e autorizadas de envio (Associate DBA @ Exadel, Analista de BI II) confirmaram de novo o reCAPTCHA Enterprise (Issue #73) — ambas agora em `attempts=3/3`. **Não retentar automaticamente.** Só podem avançar por ação humana direta no link.
+
 ### Gmail — OAuth quebrado há 13 dias (RESOLVIDO em duas camadas, 04-05/09/2026)
 - **Sintoma original:** `GOOGLE_MAIL_SCAN_FAILED` com `error: "RefreshError"` a cada ~10 minutos, ininterrupto desde `2026-08-22T03:38:43` (mais de 1.800 falhas consecutivas).
 - **Impacto real confirmado:** um convite de entrevista real (Randstad/Mercado Livre, "2ª Etapa") ficou 13 dias sem resposta detectada pelo sistema, além de múltiplas confirmações de candidatura reais (Poliedro Educação, JAMEF, Squadra Digital, Gupy/Stefanini) e questionários.
