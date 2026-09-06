@@ -29,10 +29,10 @@ from .kill_switches import fetch_kill_switches, is_paused
 from .url_policy import authenticated_application_url
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
-from .google_career import (connection_status, create_application_email_draft,
-                            create_calendar_event, create_reply_draft,
-                            mark_questionnaire_complete, scan_recruitment_mail,
-                            send_application_email, send_security_code)
+from .google_career import (check_application_thread, connection_status,
+                            create_application_email_draft, create_calendar_event,
+                            create_reply_draft, follow_up_status, mark_questionnaire_complete,
+                            scan_recruitment_mail, send_application_email, send_security_code)
 
 runtime_override = os.getenv("CAREER_RUNTIME")
 ROOT = Path(__file__).resolve().parents[3] if not runtime_override else Path("/app")
@@ -2153,6 +2153,28 @@ async def google_application_send(request: ApplicationEmailSendRequest) -> dict:
         return result
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Falha ao enviar e-mail: {type(exc).__name__}") from exc
+
+
+@app.get("/google/application-thread")
+async def google_application_thread(thread_id: str, sent_message_id: str) -> dict:
+    """Rastreia uma candidatura especifica ja enviada por e-mail - nao
+    confunde AUTO_REPLY/DELIVERY_FAILURE com resposta humana real."""
+    try:
+        result = await asyncio.to_thread(check_application_thread, GOOGLE_TOKEN, thread_id, sent_message_id)
+        event("APPLICATION_THREAD_CHECKED", thread_id=thread_id, state=result["state"])
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao verificar thread: {type(exc).__name__}") from exc
+
+
+@app.get("/google/follow-up-status")
+async def google_follow_up_status(sent_at: str) -> dict:
+    """So decide elegibilidade de follow-up (nunca envia sozinho)."""
+    try:
+        parsed = datetime.fromisoformat(sent_at)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="sent_at precisa ser ISO 8601.") from exc
+    return follow_up_status(parsed)
 
 
 @app.post("/google/calendar")

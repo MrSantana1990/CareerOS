@@ -191,6 +191,85 @@ def _classify(subject: str, body: str) -> tuple[str, int, str]:
     return "OTHER", 40, "Sem evidência suficiente de processo seletivo."
 
 
+def _reply_classification(sender: str, subject: str, body: str, auto_submitted_header: str) -> tuple[str, int, str]:
+    """Cycle 010: rastrear uma candidatura especifica exige distinguir uma
+    resposta humana real de bounce/auto-reply - o _classify() generico
+    (usado pelo scan de caixa de entrada) nunca precisou disso porque so
+    processa mensagens que ja bateram no filtro de busca por palavras-chave
+    de processo seletivo, o que uma notificacao de falha de entrega nunca
+    conteria. Auto-Submitted e um header RFC 3834 real, mais confiavel que
+    adivinhar por assunto."""
+    sender_lower = sender.lower()
+    subject_lower = subject.lower()
+    if auto_submitted_header and auto_submitted_header.strip().lower() != "no":
+        return "AUTO_REPLY", 95, "Header Auto-Submitted indica resposta automática, não humana."
+    if re.search(r"mailer-daemon|postmaster|mail delivery subsystem|delivery subsystem", sender_lower):
+        return "DELIVERY_FAILURE", 95, "Remetente é um sistema de entrega de e-mail, não um humano."
+    if re.search(r"delivery status notification|undelivered mail|couldn.?t be delivered|returned to sender|failure notice|delivery has failed|falha na entrega", subject_lower):
+        return "DELIVERY_FAILURE", 92, "Assunto indica falha de entrega do e-mail."
+    if re.search(r"resposta autom[aá]tica|auto-?reply|out of office|ausente do escrit[oó]rio|estou de f[eé]rias", subject_lower):
+        return "AUTO_REPLY", 85, "Assunto indica resposta automática (ausência/férias)."
+    category, confidence, reason = _classify(subject, body)
+    if category == "INTERVIEW":
+        return "INTERVIEW_REQUEST", confidence, reason
+    if category in {"RECRUITER", "APPLICATION_CONFIRMED", "OFFER"}:
+        return "RECRUITER_RESPONSE", confidence, reason
+    if category == "REJECTION":
+        return "REJECTION", confidence, reason
+    return "OTHER_REPLY", confidence, reason
+
+
+def check_application_thread(token_path: Path, thread_id: str, sent_message_id: str) -> dict:
+    """Rastreia uma candidatura especifica enviada por e-mail (nao um scan
+    generico de caixa de entrada) - a ausencia de resposta e sempre
+    AWAITING_RESPONSE, nunca um timeout/NO_RESPONSE inventado. So classifica
+    como RECRUITER_RESPONSE/INTERVIEW_REQUEST/REJECTION uma mensagem que
+    sobrou depois de eliminar bounce/auto-reply."""
+    credentials = _credentials(token_path)
+    gmail = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+    thread = gmail.users().threads().get(userId="me", id=thread_id, format="full").execute()
+    messages = thread.get("messages", [])
+    replies = [m for m in messages if m["id"] != sent_message_id]
+    if not replies:
+        return {"state": "AWAITING_RESPONSE", "reply_count": 0, "evidence": {}}
+    latest = replies[-1]
+    headers = _headers(latest.get("payload", {}))
+    body = _body(latest.get("payload", {}))
+    state, confidence, reason = _reply_classification(
+        headers.get("from", ""), headers.get("subject", ""), body, headers.get("auto-submitted", "")
+    )
+    return {
+        "state": state,
+        "reply_count": len(replies),
+        "evidence": {
+            "message_id": latest["id"],
+            "from": headers.get("from", ""),
+            "subject": headers.get("subject", ""),
+            "received_at": datetime.fromtimestamp(int(latest.get("internalDate", "0")) / 1000, UTC).isoformat(),
+            "confidence": confidence,
+            "reason": reason,
+            "snippet": latest.get("snippet", "")[:500],
+        },
+    }
+
+
+FOLLOW_UP_MINIMUM_DAYS = 7
+
+
+def follow_up_status(sent_at: datetime, now: datetime | None = None) -> dict:
+    """Cycle 010: nenhum mecanismo de follow-up existia (a migration
+    'communication_followup' so persiste comunicacoes recebidas, nunca
+    agenda um reenvio) - isso so decide ELEGIBILIDADE (nunca envia
+    sozinho, nunca em loop de spam). Um follow-up de verdade continua
+    exigindo uma chamada explicita, com o mesmo contexto real da vaga."""
+    now = now or datetime.now(UTC)
+    eligible_at = sent_at + timedelta(days=FOLLOW_UP_MINIMUM_DAYS)
+    if now >= eligible_at:
+        return {"eligible": True, "eligible_at": eligible_at.isoformat(), "days_remaining": 0}
+    remaining = (eligible_at - now).days + (1 if (eligible_at - now).seconds else 0)
+    return {"eligible": False, "eligible_at": eligible_at.isoformat(), "days_remaining": max(remaining, 0)}
+
+
 def _suggestion(category: str) -> str:
     if category in {"INTERVIEW", "RECRUITER"}:
         return "Olá! Obrigado pelo contato e pelo interesse no meu perfil. Tenho interesse em conversar sobre a oportunidade. Poderia confirmar a data, o horário, o fuso e o formato da conversa? Atenciosamente, Rodolfo Santana."
