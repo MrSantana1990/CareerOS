@@ -2,6 +2,8 @@
 
 Objetivo único até novo aviso: **gerar a primeira entrevista rastreável gerada 100% pelo pipeline.** Nenhum item fora deste backlog deve consumir esforço de engenharia enquanto isso não acontecer — sem novas fontes de vaga, sem novo dashboard, sem novo canal, sem mobile.
 
+**Marco atingido em 06/09/2026 (Cycle 009): `CONFIRMED 0 → 1`.** Primeira candidatura confirmada real (Deutsche Bank Brasil, candidatura espontânea por e-mail oficial publicado, `GMAIL_MESSAGE_ID=1a075f10df38136e`) — não veio de nenhum dos 4 canais tradicionais (LinkedIn/Catho/InfoJobs/Gupy), veio de Company Intelligence. Ver `docs/OPERATION-INTERVIEW-FINAL-REPORT-CYCLES-001-010.md` para o relatório consolidado completo.
+
 ## P0 — bloqueia "Operation Interview"
 
 - [x] **Corrigir o crash de memória (OOM) que derrubava 49% das candidaturas.** Cycle 001, PR #80 — medido: 0 crashes em lote real de 14 candidaturas pós-correção.
@@ -20,6 +22,12 @@ Objetivo único até novo aviso: **gerar a primeira entrevista rastreável gerad
 - [x] **Rodar radar novo pequeno (TIER A) e verificar canais alternativos.** Cycle 004 — 41 vagas novas processadas com segurança, 0 canais ATS/e-mail encontrados, 5/5 LinkedIn e 2/2 Catho testados confirmam os mesmos 3 bloqueios já mapeados.
 - [x] **Vincular intervenções humanas (`human_interventions`) à candidatura real.** Cycle 006, PR #92 — `application_id` sempre ia `None`; 6/6 intervenções pendentes em produção estavam sem vínculo. Corrigido + enriquecido (`source`/`score`/`region`/`salary_brl`/`job_url`) e validado com uma intervenção real nova pós-fix.
 - [ ] **`unknown_fields` só guarda o nome do campo, não o texto da pergunta** (achado real, Cycle 006 — candidato Catho com 13 "killer questions" sem texto capturado). Mesmo com a fila enriquecida, o humano ainda precisa abrir a página pra saber o que responder.
+- [x] **SCORE != ELIGIBILITY: piso salarial universal.** Cycle 007 — `MINIMUM_SALARY_BLOCK` (R$4.000, qualquer família) em ambos os pipelines. Achado real: candidato InfoJobs com `salary_brl=1500` passava sem bloqueio algum antes disso.
+- [x] **Conectar Discovery/ATS detection ao Core (`recruiter_email`/`application_channel`).** Cycle 009 — `detect_email_application`/`detect_ats` já descobriam dado real, mas nada propagava pro Core, que já sabia decidir a estratégia `EMAIL` sozinho. PR #102.
+- [x] **Distinguir bounce/auto-reply de resposta humana real no tracking.** Cycle 010 — `check_application_thread()` usa o header RFC 3834 `Auto-Submitted` + padrões de remetente/assunto. PR #103.
+- [ ] **Resolver o InfoJobs por outra via que não CDP/relay genérico** (tentativa revertida no Cycle 007 — PRs #95-#99 — por ser dual-use tooling). Segue `AUTH_REQUIRED`.
+- [ ] **Aprovar pelo menos uma segunda família de currículo real** (`PT_SUPPORT_SENIOR`/`PT_DBA_SQL`/`PT_DATA` etc). Achado real do Cycle 010: só existe `GENERAL` (pt-BR) aprovado no Core hoje — o Resume Router (`route_resume()`) está implementado e testado, mas nunca teve mais de uma opção real para escolher.
+- [ ] **Application-por-e-mail sem `job_id` não tem onde morar no Core.** O primeiro CONFIRMED (Deutsche Bank, candidatura espontânea) só existe como evidência de Gmail + documentação — `applications` exige `job_id`. Decisão de schema pendente (ex.: `job_id` nullable + `application_type=SPONTANEOUS`).
 
 ## P1 — necessário para "Operation Interview" produzir sinal, não só 1 evento
 

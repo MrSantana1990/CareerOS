@@ -1,23 +1,24 @@
-# Estado real do funil — 05/09/2026
+# Estado real do funil — 06/09/2026
 
-Atualizado após o Cycle 006 (Human-in-the-loop Conversion). Ver histórico da validação P0 (23-24/08) referenciado em `HELPSYSTEM-CONTINUIDADE.md`. Este arquivo reflete o que foi **comprovado com evidência real**, não o que foi desenhado em `V2-CAREER-INTELLIGENCE.md`.
+Atualizado após o Cycle 010 (checkpoint obrigatório da Operation Interview). Ver `docs/OPERATION-INTERVIEW-FINAL-REPORT-CYCLES-001-010.md` para o relatório consolidado completo. Este arquivo reflete o que foi **comprovado com evidência real**, não o que foi desenhado em `V2-CAREER-INTELLIGENCE.md`.
 
-## Baseline objetivo (produção real, 05/09/2026, pós-Cycle 006)
+## Baseline objetivo (produção real, 06/09/2026, pós-Cycle 010)
 
 | Métrica | Valor |
 |---|---|
-| Vagas descobertas (histórico) | 2.887 |
-| Vagas qualificadas (`APPROVED_AUTO`) | 693 |
-| Candidaturas totais | 693 |
+| Vagas descobertas (histórico) | 2.887+ |
+| Vagas no Core (Postgres) | 123 (`job_scores`: 120) |
+| Candidaturas totais (automation-host) | 814 |
 | Candidaturas `FAILED` | 503 |
-| Candidaturas `READY_FOR_REVIEW` (PREPARED) | 95 — 71 LinkedIn (assistido, reCAPTCHA), 15 InfoJobs (reauth pendente), 9 Catho (checar contaminação antes de enviar) |
-| Candidaturas `BLOCKED` | 74 |
-| Candidaturas `MANUAL_REQUIRED` | 24 — 1 com intervenção `PENDING` real na fila (Cycle 006) |
-| Candidaturas `READY_TO_PREPARE` | 29 |
+| Candidaturas `READY_FOR_REVIEW` (PREPARED) | 132 |
+| Candidaturas `BLOCKED` | 92 |
+| Candidaturas `MANUAL_REQUIRED` | 38 (2 LinkedIn no cap de tentativas por reCAPTCHA) |
+| Candidaturas `READY_TO_PREPARE` | 40 |
 | Candidaturas `CLOSED` | 9 |
-| **Candidaturas `APPLIED`/`CONFIRMED`** | **0** |
-| Respostas de recrutador | 1 entrevista real detectada (Randstad/Mercado Livre) + múltiplas confirmações de candidatura — Gmail restaurado no Cycle 001 |
-| Entrevistas | 1 detectada, aguardando resposta humana |
+| **CONFIRMED** | **1 — Deutsche Bank Brasil, e-mail, `GMAIL_MESSAGE_ID=1a075f10df38136e`, 06/09/2026 (Cycle 009)** |
+| `human_interventions` PENDING (Core) | 15 (2 CAPTCHA, 6 UNKNOWN_FIELD, 7 SUBMISSION_UNCONFIRMED) |
+| Respostas de recrutador (novas, pós-CONFIRMED) | 0 — thread em `AWAITING_RESPONSE` |
+| Entrevistas | 1 detectada anteriormente (Randstad/Mercado Livre), aguardando resposta humana desde Cycle 001 |
 | Ofertas | não mensurado |
 | Contratações | não mensurado |
 
