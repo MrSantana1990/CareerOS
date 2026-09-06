@@ -14,6 +14,8 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError as GoogleHttpError
 
+from .reply_tracking import classify_application_thread_reply, classify_recruitment_mail, suggested_reply
+
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
@@ -169,56 +171,6 @@ def _validate_questionnaire_link(url: str | None) -> dict:
         return {"status": "VALIDATION_ERROR", "checked_at": checked_at}
 
 
-def _classify(subject: str, body: str) -> tuple[str, int, str]:
-    subject_text = subject.lower()
-    text = f"{subject} {body}".lower()
-    rules = [
-        ("INTERVIEW", 98, r"entrevista|interview|convite.*(?:conversa|reuni[aã]o)|agendamento"),
-        ("QUESTIONNAIRE", 94, r"question[aá]rio|teste t[eé]cnico|assessment|desafio t[eé]cnico"),
-        ("OFFER", 99, r"carta proposta|proposta de trabalho|job offer|oferta de emprego"),
-        ("REJECTION", 96, r"n[aã]o seguiremos|n[aã]o avan[cç]aremos|processo encerrado"),
-        ("APPLICATION_CONFIRMED", 92, r"candidatura (?:foi )?(?:recebida|enviada)|confirma[cç][aã]o de inscri[cç][aã]o|application received"),
-    ]
-    for category, confidence, pattern in rules:
-        if re.search(pattern, subject_text, re.IGNORECASE):
-            return category, confidence, f"Assunto indica {category.lower().replace('_', ' ')}."
-    if re.search(r"gostar[ií]amos?.{0,80}(?:entrevista|conversa)|convidamos?.{0,80}(?:entrevista|processo seletivo)", text):
-        return "INTERVIEW", 92, "Conteúdo contém convite direto para conversa ou entrevista."
-    if re.search(r"n[aã]o seguiremos|n[aã]o avan[cç]aremos|optamos por outro candidato", text):
-        return "REJECTION", 92, "Conteúdo informa encerramento da candidatura."
-    if re.search(r"oportunidade (?:profissional|de trabalho)|contato sobre (?:uma )?vaga|seu perfil.{0,80}(?:vaga|oportunidade)", subject_text):
-        return "RECRUITER", 86, "Assunto indica contato individual sobre oportunidade."
-    return "OTHER", 40, "Sem evidência suficiente de processo seletivo."
-
-
-def _reply_classification(sender: str, subject: str, body: str, auto_submitted_header: str) -> tuple[str, int, str]:
-    """Cycle 010: rastrear uma candidatura especifica exige distinguir uma
-    resposta humana real de bounce/auto-reply - o _classify() generico
-    (usado pelo scan de caixa de entrada) nunca precisou disso porque so
-    processa mensagens que ja bateram no filtro de busca por palavras-chave
-    de processo seletivo, o que uma notificacao de falha de entrega nunca
-    conteria. Auto-Submitted e um header RFC 3834 real, mais confiavel que
-    adivinhar por assunto."""
-    sender_lower = sender.lower()
-    subject_lower = subject.lower()
-    if auto_submitted_header and auto_submitted_header.strip().lower() != "no":
-        return "AUTO_REPLY", 95, "Header Auto-Submitted indica resposta automática, não humana."
-    if re.search(r"mailer-daemon|postmaster|mail delivery subsystem|delivery subsystem", sender_lower):
-        return "DELIVERY_FAILURE", 95, "Remetente é um sistema de entrega de e-mail, não um humano."
-    if re.search(r"delivery status notification|undelivered mail|couldn.?t be delivered|returned to sender|failure notice|delivery has failed|falha na entrega", subject_lower):
-        return "DELIVERY_FAILURE", 92, "Assunto indica falha de entrega do e-mail."
-    if re.search(r"resposta autom[aá]tica|auto-?reply|out of office|ausente do escrit[oó]rio|estou de f[eé]rias", subject_lower):
-        return "AUTO_REPLY", 85, "Assunto indica resposta automática (ausência/férias)."
-    category, confidence, reason = _classify(subject, body)
-    if category == "INTERVIEW":
-        return "INTERVIEW_REQUEST", confidence, reason
-    if category in {"RECRUITER", "APPLICATION_CONFIRMED", "OFFER"}:
-        return "RECRUITER_RESPONSE", confidence, reason
-    if category == "REJECTION":
-        return "REJECTION", confidence, reason
-    return "OTHER_REPLY", confidence, reason
-
-
 def check_application_thread(token_path: Path, thread_id: str, sent_message_id: str) -> dict:
     """Rastreia uma candidatura especifica enviada por e-mail (nao um scan
     generico de caixa de entrada) - a ausencia de resposta e sempre
@@ -235,7 +187,7 @@ def check_application_thread(token_path: Path, thread_id: str, sent_message_id: 
     latest = replies[-1]
     headers = _headers(latest.get("payload", {}))
     body = _body(latest.get("payload", {}))
-    state, confidence, reason = _reply_classification(
+    state, confidence, reason = classify_application_thread_reply(
         headers.get("from", ""), headers.get("subject", ""), body, headers.get("auto-submitted", "")
     )
     return {
@@ -251,33 +203,6 @@ def check_application_thread(token_path: Path, thread_id: str, sent_message_id: 
             "snippet": latest.get("snippet", "")[:500],
         },
     }
-
-
-FOLLOW_UP_MINIMUM_DAYS = 7
-
-
-def follow_up_status(sent_at: datetime, now: datetime | None = None) -> dict:
-    """Cycle 010: nenhum mecanismo de follow-up existia (a migration
-    'communication_followup' so persiste comunicacoes recebidas, nunca
-    agenda um reenvio) - isso so decide ELEGIBILIDADE (nunca envia
-    sozinho, nunca em loop de spam). Um follow-up de verdade continua
-    exigindo uma chamada explicita, com o mesmo contexto real da vaga."""
-    now = now or datetime.now(UTC)
-    eligible_at = sent_at + timedelta(days=FOLLOW_UP_MINIMUM_DAYS)
-    if now >= eligible_at:
-        return {"eligible": True, "eligible_at": eligible_at.isoformat(), "days_remaining": 0}
-    remaining = (eligible_at - now).days + (1 if (eligible_at - now).seconds else 0)
-    return {"eligible": False, "eligible_at": eligible_at.isoformat(), "days_remaining": max(remaining, 0)}
-
-
-def _suggestion(category: str) -> str:
-    if category in {"INTERVIEW", "RECRUITER"}:
-        return "Olá! Obrigado pelo contato e pelo interesse no meu perfil. Tenho interesse em conversar sobre a oportunidade. Poderia confirmar a data, o horário, o fuso e o formato da conversa? Atenciosamente, Rodolfo Santana."
-    if category == "QUESTIONNAIRE":
-        return "Olá! Obrigado pelo envio. Recebi as orientações e vou analisar o questionário dentro do prazo informado. Atenciosamente, Rodolfo Santana."
-    if category == "OFFER":
-        return "Olá! Obrigado pela proposta e pela confiança. Confirmo o recebimento e gostaria de revisar os detalhes antes de responder formalmente. Atenciosamente, Rodolfo Santana."
-    return ""
 
 
 def _event_candidate(subject: str, body: str) -> dict | None:
@@ -338,7 +263,7 @@ def scan_recruitment_mail(token_path: Path, store_path: Path, days: int = 30, li
         message = _get_message_with_backoff(gmail, reference["id"])
         headers = _headers(message.get("payload", {}))
         body = _body(message.get("payload", {}))
-        category, confidence, reason = _classify(headers.get("subject", ""), body)
+        category, confidence, reason = classify_recruitment_mail(headers.get("subject", ""), body)
         if category == "OTHER":
             continue
         previous_item = previous.get(message["id"], {})
@@ -365,7 +290,7 @@ def scan_recruitment_mail(token_path: Path, store_path: Path, days: int = 30, li
             "received_at": datetime.fromtimestamp(int(message.get("internalDate", "0")) / 1000, UTC).isoformat(),
             "category": category, "confidence": confidence, "reason": reason,
             "snippet": message.get("snippet", "")[:500], "status": "NEW",
-            "suggested_reply": _suggestion(category),
+            "suggested_reply": suggested_reply(category),
             "draft_id": previous.get(message["id"], {}).get("draft_id"),
             "calendar_event_id": previous.get(message["id"], {}).get("calendar_event_id"),
             "event_candidate": _event_candidate(headers.get("subject", ""), body) if category == "INTERVIEW" else None,

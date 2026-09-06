@@ -31,8 +31,9 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 from .google_career import (check_application_thread, connection_status,
                             create_application_email_draft, create_calendar_event,
-                            create_reply_draft, follow_up_status, mark_questionnaire_complete,
+                            create_reply_draft, mark_questionnaire_complete,
                             scan_recruitment_mail, send_application_email, send_security_code)
+from .reply_tracking import follow_up_status
 
 runtime_override = os.getenv("CAREER_RUNTIME")
 ROOT = Path(__file__).resolve().parents[3] if not runtime_override else Path("/app")
