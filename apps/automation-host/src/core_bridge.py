@@ -113,7 +113,8 @@ def job_idempotency_key(source: str, source_url: str) -> str:
 def build_job_record(*, source: str, source_url: str, company: str, title: str,
                       description: str, location: str, correlation_id: str,
                       recruiter_email: str | None = None, recruiter_name: str | None = None,
-                      application_channel: str | None = None) -> CoreSyncRecord:
+                      application_channel: str | None = None,
+                      structured_extraction: dict | None = None) -> CoreSyncRecord:
     payload = {
         "source": source,
         "source_url": source_url,
@@ -133,6 +134,11 @@ def build_job_record(*, source: str, source_url: str, company: str, title: str,
         payload["recruiter_name"] = recruiter_name
     if application_channel:
         payload["application_channel"] = application_channel
+    # Prompt 3: idem para o Job Content Understanding estruturado
+    # (structured_fields.py) - o Core ja tem a coluna (migration 0015),
+    # so faltava alguem preencher.
+    if structured_extraction:
+        payload["structured_extraction"] = structured_extraction
     return CoreSyncRecord(
         kind="JOB",
         payload=payload,

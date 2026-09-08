@@ -181,6 +181,7 @@ class JobInput(BaseModel):
     application_channel: str | None = Field(default=None, max_length=40)
     recruiter_name: str | None = Field(default=None, max_length=200)
     recruiter_email: str | None = Field(default=None, max_length=254)
+    structured_extraction: dict[str, Any] | None = None
 
 
 class TransitionInput(BaseModel):
@@ -603,7 +604,9 @@ async def ingest_job(payload: JobInput, slug: str = Depends(require_admin)) -> d
                    "canonical_url": payload.canonical_url or payload.source_url,
                    "language_requirements": json.dumps(payload.language_requirements),
                    "required_skills": json.dumps(payload.required_skills),
-                   "preferred_skills": json.dumps(payload.preferred_skills)})
+                   "preferred_skills": json.dumps(payload.preferred_skills),
+                   "structured_extraction": json.dumps(payload.structured_extraction)
+                                            if payload.structured_extraction is not None else None})
     async with SessionLocal() as session:
         company_id = await session.scalar(text("SELECT id FROM companies WHERE organization_id=:organization_id AND lower(name)=lower(:company) AND deleted_at IS NULL LIMIT 1"), values)
         if not company_id:
@@ -615,12 +618,13 @@ async def ingest_job(payload: JobInput, slug: str = Depends(require_admin)) -> d
             INSERT INTO jobs (id, organization_id, company_id, external_id, source, source_url, canonical_url,
               title, description, family, location, country, employment_type, work_model, seniority,
               salary_min, salary_max, salary_currency, salary_period, language_requirements,
-              required_skills, preferred_skills, application_channel, recruiter_name, recruiter_email, fingerprint)
+              required_skills, preferred_skills, application_channel, recruiter_name, recruiter_email,
+              structured_extraction, fingerprint)
             VALUES (gen_random_uuid(), :organization_id, :company_id, :external_id, :source, :source_url, :canonical_url,
               :title, :description, :family, :location, :country, :employment_type, :work_model, :seniority,
               :salary_min, :salary_max, :salary_currency, :salary_period, CAST(:language_requirements AS jsonb),
               CAST(:required_skills AS jsonb), CAST(:preferred_skills AS jsonb), :application_channel,
-              :recruiter_name, :recruiter_email, :fingerprint) RETURNING id
+              :recruiter_name, :recruiter_email, CAST(:structured_extraction AS jsonb), :fingerprint) RETURNING id
         """), values)
         await session.execute(text("""
             INSERT INTO job_sources (id, organization_id, job_id, source, external_id, source_url)

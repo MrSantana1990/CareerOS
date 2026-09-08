@@ -26,6 +26,9 @@ from .email_discovery import detect_email_application
 from .evidence_check import is_evidence_grounded
 from .hard_blocks import assess_hard_blocks, extract_salary_brl
 from .kill_switches import fetch_kill_switches, is_paused
+from .market_signal_source import (DEFAULT_QUERIES, build_rss_url, classify_signal_type,
+                                   fetch_rss, parse_rss_items, resolve_company)
+from .structured_fields import extract_all as extract_structured_fields
 from .url_policy import authenticated_application_url
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -769,6 +772,14 @@ async def sync_job_to_core(page: Page, job: dict, application: dict, body: str) 
     recruiter_email = str(email_application.get("email") or "").strip() or None
     ats_match = detect_ats(page.url)
     application_channel = ats_match.adapter.upper() if ats_match else None
+    # Prompt 3 (Job Content Understanding): extracao estruturada tier 4/5
+    # (regex deterministico sobre o texto ja renderizado pelo navegador) -
+    # nunca substitui a leitura de body existente, so acrescenta campos com
+    # evidencia (salario/modalidade/regiao/idioma exigido/mandatory vs
+    # preferred/instrucoes de candidatura) que o Prompt 4 (Opportunity
+    # Brain) vai consumir. Ausencia de evidencia = campo ausente, nunca
+    # inventado.
+    structured = extract_structured_fields(body, source_url=page.url)
     record = build_job_record(
         source=str(job.get("source", "")),
         source_url=str(job.get("url", "")),
@@ -779,6 +790,7 @@ async def sync_job_to_core(page: Page, job: dict, application: dict, body: str) 
         correlation_id=application["id"],
         recruiter_email=recruiter_email,
         application_channel=application_channel,
+        structured_extraction=structured or None,
     )
     enqueue_core_sync(record)
     event("CORE_SYNC_ENQUEUED", kind="JOB", correlation_id=application["id"],
@@ -1939,6 +1951,7 @@ async def startup_scheduler() -> None:
     asyncio.create_task(daily_scheduler())
     asyncio.create_task(google_mail_scheduler())
     asyncio.create_task(core_sync_scheduler())
+    asyncio.create_task(market_scan_scheduler())
 
 
 @app.get("/health")
@@ -2109,6 +2122,110 @@ async def sync_communications_to_core(items: list[dict]) -> bool:
     except Exception as sync_error:
         event("GOOGLE_CORE_SYNC_FAILED", error=type(sync_error).__name__, items=len(items))
         return False
+
+
+def _fetch_known_company_names() -> list[str]:
+    request = Request(CAREER_API_URL + "/api/v1/companies?limit=500",
+                       headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}"})
+    with urlopen(request, timeout=20) as response:
+        companies = json.loads(response.read().decode("utf-8"))
+    return [(item["name"], item["id"]) for item in companies]
+
+
+def _post_signal(payload: dict) -> dict:
+    request = Request(
+        CAREER_API_URL + "/api/v1/signals",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+async def market_scan() -> dict:
+    """Perception Engine v1 (Fase 2, Prompt 3) - unica fonte real de Market
+    Signal em producao hoje (ver Source Selection Report do Prompt 3):
+    Google News RSS, publico, sem autenticacao, syndication documentada.
+    Nunca usa Claude/Codex/WebSearch em runtime - so urllib + xml.etree
+    (market_signal_source.py, stdlib puro). Falha desta funcao nunca pode
+    derrubar os outros schedulers (chamada sempre dentro de try/except no
+    loop chamador)."""
+    if not CAREER_ADMIN_TOKEN:
+        event("MARKET_SCAN_SKIPPED", reason="missing_admin_token")
+        return {"items_seen": 0}
+    started = datetime.now(UTC)
+    event("MARKET_SCAN_STARTED")
+    metrics = {"items_seen": 0, "items_normalized": 0, "signals_created": 0,
+               "duplicates": 0, "unresolved_company": 0, "errors": 0}
+    try:
+        known_companies = await asyncio.to_thread(_fetch_known_company_names)
+        known_names = [name for name, _ in known_companies]
+        name_to_id = dict(known_companies)
+        for query in DEFAULT_QUERIES:
+            try:
+                xml_text = await asyncio.to_thread(fetch_rss, build_rss_url(query))
+                raw_items = parse_rss_items(xml_text)
+            except Exception as fetch_error:
+                metrics["errors"] += 1
+                event("MARKET_SCAN_SOURCE_FAILED", query=query, error=type(fetch_error).__name__)
+                continue
+            metrics["items_seen"] += len(raw_items)
+            for item in raw_items:
+                metrics["items_normalized"] += 1
+                signal_type = classify_signal_type(item.title)
+                company_name = resolve_company(item.title, known_names)
+                company_id = name_to_id.get(company_name) if company_name else None
+                if not company_id:
+                    metrics["unresolved_company"] += 1
+                event("SIGNAL_DISCOVERED", type=signal_type, company_resolved=bool(company_id))
+                payload = {
+                    "type": signal_type,
+                    "company_id": company_id,
+                    "source_url": item.link,
+                    "source_type": "NEWS",
+                    "headline": item.title[:300],
+                    "summary": None,
+                    "published_at": None,
+                    "confidence": 60,
+                    "evidence": {"query": query, "source_name": item.source,
+                                 "raw_pub_date": item.published_at, "fetched_via": "google_news_rss"},
+                }
+                try:
+                    result = await asyncio.to_thread(_post_signal, payload)
+                    if result.get("created"):
+                        metrics["signals_created"] += 1
+                        event("SIGNAL_PERSISTED", signal_id=result.get("id"), type=signal_type)
+                    else:
+                        metrics["duplicates"] += 1
+                        event("SIGNAL_DUPLICATE", signal_id=result.get("id"), type=signal_type)
+                except Exception as post_error:
+                    metrics["errors"] += 1
+                    event("MARKET_SCAN_SIGNAL_POST_FAILED", error=type(post_error).__name__)
+        metrics["duration_seconds"] = (datetime.now(UTC) - started).total_seconds()
+        event("MARKET_SCAN_COMPLETED", **metrics)
+        return metrics
+    except Exception as exc:
+        metrics["errors"] += 1
+        metrics["duration_seconds"] = (datetime.now(UTC) - started).total_seconds()
+        event("MARKET_SCAN_FAILED", error=type(exc).__name__, **metrics)
+        return metrics
+
+
+async def market_scan_scheduler() -> None:
+    """1x/dia, horario distinto dos slots 8/12/18 do daily_scheduler (secao
+    8 do Prompt 3) - as 6h, antes do pipeline tradicional comecar."""
+    last_slot = ""
+    while True:
+        now = datetime.now().astimezone()
+        slot = now.date().isoformat()
+        if now.hour == 6 and slot != last_slot:
+            last_slot = slot
+            try:
+                await market_scan()
+            except Exception as exc:
+                event("MARKET_SCAN_FAILED", error=type(exc).__name__)
+        await asyncio.sleep(60)
 
 
 @app.post("/google/scan")
