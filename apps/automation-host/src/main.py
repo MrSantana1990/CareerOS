@@ -1904,6 +1904,13 @@ async def google_mail_scheduler() -> None:
                 # (90/250) para um catch-up deliberado quando necessário.
                 result = await asyncio.to_thread(scan_recruitment_mail, GOOGLE_TOKEN, GOOGLE_INBOX, 7, 40)
                 event("GOOGLE_MAIL_SCANNED", scanned=result["scanned"], discovered=result["discovered"])
+                # Bug real (auditoria pre-Fase 2): faltava isto aqui - o scan
+                # autonomo classificava tudo no tracker local e nunca chegava
+                # ao Core. sync_communications_to_core nunca propaga excecao,
+                # entao uma falha do Core nao conta como falha do Gmail
+                # (consecutive_failures abaixo so mede a saude da API do
+                # Google, nao a do Core).
+                await sync_communications_to_core(result["items"])
                 if health.get("consecutive_failures", 0) >= GOOGLE_HEALTH_ALERT_THRESHOLD:
                     event("GOOGLE_MAIL_RECOVERED", after_failures=health["consecutive_failures"])
                 save_json(GOOGLE_HEALTH, {
@@ -2065,33 +2072,52 @@ async def google_status() -> dict:
         }
 
 
+async def sync_communications_to_core(items: list[dict]) -> bool:
+    """Caminho unico de sincronizacao de comunicacoes com o Core - usado
+    tanto pelo scan manual (/google/scan) quanto pelo scheduler autonomo
+    (google_mail_scheduler). Bug real encontrado em auditoria (Reality
+    Check, pre-Fase 2): so o caminho manual chamava isto - o scheduler
+    autonomo (a cada ~10min) nunca sincronizava, deixando
+    recruitment_communications no Core parado desde 2026-08-23 apesar de
+    427 scans autonomos bem-sucedidos no tracker local. POST /communications/
+    sync no Core ja e idempotente (ON CONFLICT DO UPDATE por
+    provider_message_id) - nenhum dedup client-side e necessario aqui.
+    Nunca propaga excecao: uma falha do Core nao pode derrubar o
+    scheduler de Gmail, que so depende da API do Google."""
+    if not CAREER_ADMIN_TOKEN or not items:
+        return False
+    payload = {"provider": "GMAIL", "items": [{
+        "provider_message_id": item["message_id"],
+        "thread_id": item.get("thread_id"),
+        "sender": item.get("sender", ""),
+        "subject": item.get("subject", "(sem assunto)"),
+        "category": item.get("category", "OTHER"),
+        "confidence": item.get("confidence", 0),
+        "received_at": item["received_at"],
+    } for item in items]}
+    try:
+        request = Request(
+            CAREER_API_URL + "/api/v1/communications/sync",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}",
+                     "Content-Type": "application/json"},
+            method="POST",
+        )
+        await asyncio.to_thread(urlopen, request, timeout=20)
+        event("GOOGLE_CORE_SYNC_COMPLETED", items=len(items))
+        return True
+    except Exception as sync_error:
+        event("GOOGLE_CORE_SYNC_FAILED", error=type(sync_error).__name__, items=len(items))
+        return False
+
+
 @app.post("/google/scan")
 async def google_scan() -> dict:
     if not GOOGLE_TOKEN.exists():
         raise HTTPException(status_code=401, detail="Google ainda não autorizado.")
     try:
         result = await asyncio.to_thread(scan_recruitment_mail, GOOGLE_TOKEN, GOOGLE_INBOX, 90, 250)
-        if CAREER_ADMIN_TOKEN:
-            payload = {"provider": "GMAIL", "items": [{
-                "provider_message_id": item["message_id"],
-                "thread_id": item.get("thread_id"),
-                "sender": item.get("sender", ""),
-                "subject": item.get("subject", "(sem assunto)"),
-                "category": item.get("category", "OTHER"),
-                "confidence": item.get("confidence", 0),
-                "received_at": item["received_at"],
-            } for item in result["items"]]}
-            try:
-                request = Request(
-                    CAREER_API_URL + "/api/v1/communications/sync",
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}",
-                             "Content-Type": "application/json"},
-                    method="POST",
-                )
-                await asyncio.to_thread(urlopen, request, timeout=20)
-            except Exception as sync_error:
-                event("GOOGLE_CORE_SYNC_FAILED", error=type(sync_error).__name__)
+        await sync_communications_to_core(result["items"])
         event("GOOGLE_MAIL_SCANNED", scanned=result["scanned"], discovered=result["discovered"])
         return result
     except Exception as exc:
