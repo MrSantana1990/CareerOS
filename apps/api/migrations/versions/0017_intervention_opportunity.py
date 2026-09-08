@@ -15,7 +15,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision = "0017_action_engine_intervention_opportunity"
+revision = "0017_intervention_opportunity"
 down_revision = "0016_opportunity_brain_decision"
 
 UUID = postgresql.UUID(as_uuid=True)
