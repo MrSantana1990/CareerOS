@@ -16,6 +16,7 @@ from .auth import require_admin
 from .quality import job_fingerprint, match_radars, normalize, score_job, transition_allowed
 from .preparation import application_strategy, idempotency_key, prepare_email_draft, route_resume
 from .communications import correlate_message, notification_priority
+from .market_memory import opportunity_fingerprint, signal_fingerprint, watch_fingerprint
 
 router = APIRouter(prefix="/api/v1", tags=["career"])
 
@@ -72,6 +73,80 @@ class ProfileInput(BaseModel):
     target_roles: list[str] = []
     skills: list[str] = []
     approved_answers: dict[str, str] = {}
+
+
+class CompanyInput(BaseModel):
+    name: str = Field(min_length=2, max_length=200)
+
+
+SIGNAL_TYPES = Literal["EXPANSION", "INVESTMENT", "NEW_OFFICE", "NEW_OPERATION", "NEW_PROJECT",
+                       "HIRING_ANNOUNCEMENT", "RECRUITER_SIGNAL", "CAREERS_CHANGE", "JOB_DISCOVERED",
+                       "OTHER_VERIFIED_SIGNAL"]
+OPPORTUNITY_TYPES = Literal["JOB_APPLICATION", "SPONTANEOUS_APPLICATION", "TALENT_POOL",
+                            "DIRECT_OUTREACH", "RECRUITER_OPPORTUNITY", "FUTURE_HIRING", "WATCH_ONLY"]
+OPPORTUNITY_STATUSES = Literal["DISCOVERED", "EVALUATING", "WATCH", "RECHECK", "ACTIONABLE", "PREPARED",
+                               "HUMAN_REQUIRED", "BLOCKED", "DROPPED", "APPLIED", "CLOSED"]
+CHANNEL_TYPES = Literal["OFFICIAL_ATS", "OFFICIAL_CAREERS", "OFFICIAL_EMAIL", "TALENT_POOL",
+                        "SPONTANEOUS_APPLICATION", "RECRUITER_INSTRUCTION", "ASSISTED", "WATCH"]
+CHANNEL_STATUSES = Literal["CANDIDATE", "VERIFIED", "REJECTED", "USED"]
+WATCH_STATUSES = Literal["ACTIVE", "PROMOTED", "EXPIRED"]
+
+
+class SignalInput(BaseModel):
+    type: SIGNAL_TYPES
+    company_id: UUID | None = None
+    source_url: str | None = Field(default=None, max_length=1000)
+    source_type: str | None = Field(default=None, max_length=40)
+    headline: str = Field(min_length=2, max_length=300)
+    summary: str | None = Field(default=None, max_length=5000)
+    observed_at: datetime | None = None
+    published_at: datetime | None = None
+    confidence: int | None = Field(default=None, ge=0, le=100)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class OpportunityInput(BaseModel):
+    company_id: UUID
+    job_id: UUID | None = None
+    signal_id: UUID | None = None
+    type: OPPORTUNITY_TYPES
+    status: OPPORTUNITY_STATUSES = "DISCOVERED"
+    discovery_source: str | None = Field(default=None, max_length=60)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class OpportunityStatusInput(BaseModel):
+    status: OPPORTUNITY_STATUSES
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class OpportunityChannelInput(BaseModel):
+    type: CHANNEL_TYPES
+    url_or_email: str = Field(min_length=3, max_length=500)
+    source: str | None = Field(default=None, max_length=1000)
+    verified_at: datetime | None = None
+    confidence: int | None = Field(default=None, ge=0, le=100)
+    requires_auth: bool = False
+    requires_captcha: bool = False
+    requires_human: bool = False
+    status: CHANNEL_STATUSES = "CANDIDATE"
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class WatchInput(BaseModel):
+    company_id: UUID
+    opportunity_id: UUID | None = None
+    reason: str = Field(min_length=3, max_length=2000)
+    next_check_at: datetime | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class WatchUpdateInput(BaseModel):
+    status: WATCH_STATUSES | None = None
+    last_checked_at: datetime | None = None
+    next_check_at: datetime | None = None
+    check_count: int | None = Field(default=None, ge=0)
+    evidence: dict[str, Any] | None = None
 
 
 class CompanyIntelInput(BaseModel):
@@ -611,6 +686,267 @@ async def update_company_intelligence(company_id: UUID, payload: CompanyIntelInp
         """), values)
         if not updated_id:
             raise HTTPException(status_code=404, detail="Empresa não encontrada.")
+        await session.commit()
+    return {"id": updated_id, "updated": True}
+
+
+@router.post("/companies")
+async def create_company(payload: CompanyInput, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Find-or-create por nome - mesma logica ja usada dentro de ingest_job
+    (career.py), so exposta como rota propria porque Market Memory (Fase 2)
+    precisa resolver uma Company sem depender de uma Job existir primeiro."""
+    org_id = await organization_id(slug)
+    values = {"organization_id": org_id, "company": payload.name}
+    async with SessionLocal() as session:
+        company_id = await session.scalar(text(
+            "SELECT id FROM companies WHERE organization_id=:organization_id "
+            "AND lower(name)=lower(:company) AND deleted_at IS NULL LIMIT 1"
+        ), values)
+        created = company_id is None
+        if not company_id:
+            company_id = await session.scalar(text(
+                "INSERT INTO companies (id, organization_id, name) "
+                "VALUES (gen_random_uuid(), :organization_id, :company) RETURNING id"
+            ), values)
+        await session.commit()
+    return {"id": company_id, "created": created}
+
+
+@router.post("/signals")
+async def create_signal(payload: SignalInput, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Upsert por dedup_fingerprint - reenviar o mesmo sinal (mesma empresa,
+    tipo e source_url) nunca cria uma segunda linha."""
+    org_id = await organization_id(slug)
+    fingerprint = signal_fingerprint(str(payload.company_id) if payload.company_id else None,
+                                      payload.type, payload.source_url or "")
+    values = payload.model_dump(mode="json")
+    values.update({"organization_id": org_id, "dedup_fingerprint": fingerprint,
+                   "evidence": json.dumps(payload.evidence)})
+    async with SessionLocal() as session:
+        row = (await session.execute(text("""
+            INSERT INTO signals (id, organization_id, company_id, type, source_url, source_type,
+              headline, summary, observed_at, published_at, confidence, evidence, dedup_fingerprint)
+            VALUES (gen_random_uuid(), :organization_id, :company_id, :type, :source_url, :source_type,
+              :headline, :summary, COALESCE(:observed_at, now()), :published_at, :confidence,
+              CAST(:evidence AS jsonb), :dedup_fingerprint)
+            ON CONFLICT (organization_id, dedup_fingerprint) DO UPDATE SET
+              confidence=EXCLUDED.confidence, evidence=EXCLUDED.evidence, updated_at=now()
+            RETURNING id, (xmax = 0) AS created
+        """), values)).mappings().one()
+        await session.commit()
+    return {"id": row["id"], "created": row["created"], "dedup_fingerprint": fingerprint}
+
+
+@router.get("/signals")
+async def list_signals(status: str | None = None, company_id: UUID | None = None,
+                        limit: int = 100, slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    org_id = await organization_id(slug)
+    query = text("""
+        SELECT id, company_id, type, source_url, source_type, headline, summary, observed_at,
+               published_at, confidence, evidence, status, created_at
+        FROM signals
+        WHERE organization_id=:organization_id
+          AND (:status IS NULL OR status=:status)
+          AND (:company_id IS NULL OR company_id=:company_id)
+        ORDER BY observed_at DESC LIMIT :limit
+    """)
+    async with SessionLocal() as session:
+        rows = (await session.execute(query, {
+            "organization_id": org_id, "status": status, "company_id": company_id,
+            "limit": min(max(limit, 1), 500),
+        })).mappings()
+    return [dict(row) for row in rows]
+
+
+@router.post("/opportunities")
+async def create_opportunity(payload: OpportunityInput, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Upsert por dedup_fingerprint (company+type+job+signal) - nunca cria
+    uma segunda Opportunity para a mesma combinacao real."""
+    org_id = await organization_id(slug)
+    fingerprint = opportunity_fingerprint(
+        str(payload.company_id), payload.type,
+        str(payload.job_id) if payload.job_id else None,
+        str(payload.signal_id) if payload.signal_id else None,
+    )
+    values = payload.model_dump(mode="json")
+    values.update({"organization_id": org_id, "dedup_fingerprint": fingerprint,
+                   "evidence": json.dumps(payload.evidence)})
+    async with SessionLocal() as session:
+        row = (await session.execute(text("""
+            INSERT INTO opportunities (id, organization_id, company_id, job_id, signal_id, type,
+              status, discovery_source, dedup_fingerprint, evidence)
+            VALUES (gen_random_uuid(), :organization_id, :company_id, :job_id, :signal_id, :type,
+              :status, :discovery_source, :dedup_fingerprint, CAST(:evidence AS jsonb))
+            ON CONFLICT (organization_id, dedup_fingerprint) DO UPDATE SET
+              evidence=EXCLUDED.evidence, updated_at=now()
+            RETURNING id, status, (xmax = 0) AS created
+        """), values)).mappings().one()
+        await session.commit()
+    return {"id": row["id"], "status": row["status"], "created": row["created"],
+            "dedup_fingerprint": fingerprint}
+
+
+@router.get("/opportunities")
+async def list_opportunities(status: str | None = None, company_id: UUID | None = None,
+                              limit: int = 100, slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    org_id = await organization_id(slug)
+    query = text("""
+        SELECT o.id, o.company_id, c.name AS company, o.job_id, o.signal_id, o.type, o.status,
+               o.discovery_source, o.evidence, o.created_at, o.updated_at
+        FROM opportunities o JOIN companies c ON c.id=o.company_id
+        WHERE o.organization_id=:organization_id
+          AND (:status IS NULL OR o.status=:status)
+          AND (:company_id IS NULL OR o.company_id=:company_id)
+        ORDER BY o.updated_at DESC LIMIT :limit
+    """)
+    async with SessionLocal() as session:
+        rows = (await session.execute(query, {
+            "organization_id": org_id, "status": status, "company_id": company_id,
+            "limit": min(max(limit, 1), 500),
+        })).mappings()
+    return [dict(row) for row in rows]
+
+
+@router.patch("/opportunities/{opportunity_id}")
+async def update_opportunity_status(opportunity_id: UUID, payload: OpportunityStatusInput,
+                                     slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    values = {"organization_id": org_id, "opportunity_id": opportunity_id,
+              "status": payload.status, "evidence": json.dumps(payload.evidence)}
+    async with SessionLocal() as session:
+        updated_id = await session.scalar(text("""
+            UPDATE opportunities SET status=:status,
+              evidence = evidence || CAST(:evidence AS jsonb), updated_at=now()
+            WHERE id=:opportunity_id AND organization_id=:organization_id
+            RETURNING id
+        """), values)
+        if not updated_id:
+            raise HTTPException(status_code=404, detail="Opportunity não encontrada.")
+        await session.commit()
+    return {"id": updated_id, "status": payload.status}
+
+
+@router.post("/opportunities/{opportunity_id}/channels")
+async def create_opportunity_channel(opportunity_id: UUID, payload: OpportunityChannelInput,
+                                      slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """OFFICIAL_EMAIL so pode existir aqui com source preenchido - nunca um
+    e-mail inferido/adivinhado (regra permanente do produto)."""
+    org_id = await organization_id(slug)
+    if payload.type == "OFFICIAL_EMAIL" and not payload.source:
+        raise HTTPException(status_code=422,
+                             detail="OFFICIAL_EMAIL exige source (evidência de publicação oficial).")
+    values = payload.model_dump(mode="json")
+    values.update({"organization_id": org_id, "opportunity_id": opportunity_id,
+                   "evidence": json.dumps(payload.evidence)})
+    async with SessionLocal() as session:
+        exists = await session.scalar(text(
+            "SELECT id FROM opportunities WHERE id=:opportunity_id AND organization_id=:organization_id"
+        ), values)
+        if not exists:
+            raise HTTPException(status_code=404, detail="Opportunity não encontrada.")
+        row = (await session.execute(text("""
+            INSERT INTO opportunity_channels (id, organization_id, opportunity_id, type, url_or_email,
+              source, verified_at, confidence, requires_auth, requires_captcha, requires_human,
+              status, evidence)
+            VALUES (gen_random_uuid(), :organization_id, :opportunity_id, :type, :url_or_email,
+              :source, :verified_at, :confidence, :requires_auth, :requires_captcha, :requires_human,
+              :status, CAST(:evidence AS jsonb))
+            ON CONFLICT (opportunity_id, type, url_or_email) DO UPDATE SET
+              verified_at=EXCLUDED.verified_at, confidence=EXCLUDED.confidence,
+              status=EXCLUDED.status, evidence=EXCLUDED.evidence, updated_at=now()
+            RETURNING id, (xmax = 0) AS created
+        """), values)).mappings().one()
+        await session.commit()
+    return {"id": row["id"], "created": row["created"]}
+
+
+@router.get("/opportunities/{opportunity_id}/channels")
+async def list_opportunity_channels(opportunity_id: UUID,
+                                     slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    org_id = await organization_id(slug)
+    query = text("""
+        SELECT id, type, url_or_email, source, verified_at, confidence, requires_auth,
+               requires_captcha, requires_human, status, evidence, created_at
+        FROM opportunity_channels
+        WHERE organization_id=:organization_id AND opportunity_id=:opportunity_id
+        ORDER BY created_at
+    """)
+    async with SessionLocal() as session:
+        rows = (await session.execute(query, {
+            "organization_id": org_id, "opportunity_id": opportunity_id,
+        })).mappings()
+    return [dict(row) for row in rows]
+
+
+@router.post("/watches")
+async def create_watch(payload: WatchInput, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Upsert por dedup_fingerprint (company+opportunity) - so um Watch
+    ACTIVE por combinacao real, mesmo quando opportunity_id e NULL (Watch
+    so a nivel de empresa, ex.: Nubank sem oportunidade acionavel hoje)."""
+    org_id = await organization_id(slug)
+    fingerprint = watch_fingerprint(str(payload.company_id),
+                                     str(payload.opportunity_id) if payload.opportunity_id else None)
+    values = payload.model_dump(mode="json")
+    values.update({"organization_id": org_id, "dedup_fingerprint": fingerprint,
+                   "evidence": json.dumps(payload.evidence)})
+    async with SessionLocal() as session:
+        row = (await session.execute(text("""
+            INSERT INTO watches (id, organization_id, company_id, opportunity_id, reason,
+              next_check_at, dedup_fingerprint, evidence)
+            VALUES (gen_random_uuid(), :organization_id, :company_id, :opportunity_id, :reason,
+              :next_check_at, :dedup_fingerprint, CAST(:evidence AS jsonb))
+            ON CONFLICT (organization_id, dedup_fingerprint) DO UPDATE SET
+              reason=EXCLUDED.reason, next_check_at=EXCLUDED.next_check_at,
+              evidence=EXCLUDED.evidence, updated_at=now()
+            RETURNING id, status, (xmax = 0) AS created
+        """), values)).mappings().one()
+        await session.commit()
+    return {"id": row["id"], "status": row["status"], "created": row["created"],
+            "dedup_fingerprint": fingerprint}
+
+
+@router.get("/watches")
+async def list_watches(due: bool = False, status: str | None = None,
+                        limit: int = 100, slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    org_id = await organization_id(slug)
+    query = text("""
+        SELECT id, company_id, opportunity_id, reason, status, last_checked_at, next_check_at,
+               check_count, evidence, created_at
+        FROM watches
+        WHERE organization_id=:organization_id
+          AND (:status IS NULL OR status=:status)
+          AND (NOT :due OR (status='ACTIVE' AND next_check_at <= now()))
+        ORDER BY next_check_at NULLS LAST LIMIT :limit
+    """)
+    async with SessionLocal() as session:
+        rows = (await session.execute(query, {
+            "organization_id": org_id, "status": status, "due": due,
+            "limit": min(max(limit, 1), 500),
+        })).mappings()
+    return [dict(row) for row in rows]
+
+
+@router.patch("/watches/{watch_id}")
+async def update_watch(watch_id: UUID, payload: WatchUpdateInput,
+                        slug: str = Depends(require_admin)) -> dict[str, Any]:
+    org_id = await organization_id(slug)
+    values = payload.model_dump(mode="json")
+    values.update({"organization_id": org_id, "watch_id": watch_id,
+                   "evidence": json.dumps(payload.evidence) if payload.evidence is not None else None})
+    async with SessionLocal() as session:
+        updated_id = await session.scalar(text("""
+            UPDATE watches SET
+              status=COALESCE(:status, status),
+              last_checked_at=COALESCE(:last_checked_at, last_checked_at),
+              next_check_at=COALESCE(:next_check_at, next_check_at),
+              check_count=COALESCE(:check_count, check_count),
+              evidence=COALESCE(CAST(:evidence AS jsonb), evidence),
+              updated_at=now()
+            WHERE id=:watch_id AND organization_id=:organization_id
+            RETURNING id
+        """), values)
+        if not updated_id:
+            raise HTTPException(status_code=404, detail="Watch não encontrado.")
         await session.commit()
     return {"id": updated_id, "updated": True}
 
