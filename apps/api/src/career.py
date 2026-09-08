@@ -746,8 +746,8 @@ async def list_signals(status: str | None = None, company_id: UUID | None = None
                published_at, confidence, evidence, status, created_at
         FROM signals
         WHERE organization_id=:organization_id
-          AND (:status IS NULL OR status=:status)
-          AND (:company_id IS NULL OR company_id=:company_id)
+          AND (CAST(:status AS varchar) IS NULL OR status=CAST(:status AS varchar))
+          AND (CAST(:company_id AS uuid) IS NULL OR company_id=CAST(:company_id AS uuid))
         ORDER BY observed_at DESC LIMIT :limit
     """)
     async with SessionLocal() as session:
@@ -795,8 +795,8 @@ async def list_opportunities(status: str | None = None, company_id: UUID | None 
                o.discovery_source, o.evidence, o.created_at, o.updated_at
         FROM opportunities o JOIN companies c ON c.id=o.company_id
         WHERE o.organization_id=:organization_id
-          AND (:status IS NULL OR o.status=:status)
-          AND (:company_id IS NULL OR o.company_id=:company_id)
+          AND (CAST(:status AS varchar) IS NULL OR o.status=CAST(:status AS varchar))
+          AND (CAST(:company_id AS uuid) IS NULL OR o.company_id=CAST(:company_id AS uuid))
         ORDER BY o.updated_at DESC LIMIT :limit
     """)
     async with SessionLocal() as session:
@@ -914,7 +914,7 @@ async def list_watches(due: bool = False, status: str | None = None,
                check_count, evidence, created_at
         FROM watches
         WHERE organization_id=:organization_id
-          AND (:status IS NULL OR status=:status)
+          AND (CAST(:status AS varchar) IS NULL OR status=CAST(:status AS varchar))
           AND (NOT :due OR (status='ACTIVE' AND next_check_at <= now()))
         ORDER BY next_check_at NULLS LAST LIMIT :limit
     """)
