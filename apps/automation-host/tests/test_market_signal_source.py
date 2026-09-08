@@ -86,6 +86,21 @@ def test_resolve_company_prefers_the_longer_more_specific_match() -> None:
     assert result == "Deutsche Bank Brasil"
 
 
+def test_resolve_company_never_matches_substring_inside_another_word() -> None:
+    # Achado real na validacao do Prompt 4: a Company "EXA" batia via
+    # substring simples em toda manchete terminando com "- Exame" (nome da
+    # fonte jornalistica, nao da empresa) - 9 de ~15 Signals resolvidos na
+    # amostra real eram esse falso-positivo. Match agora exige fronteira de
+    # palavra (\b), nao substring.
+    result = resolve_company("18 franquias baratas para trabalhar - Exame", ["EXA", "Nubank"])
+    assert result is None
+
+
+def test_resolve_company_still_matches_short_name_as_whole_word() -> None:
+    result = resolve_company("EXA anuncia expansão em Campinas", ["EXA", "Nubank"])
+    assert result == "EXA"
+
+
 def test_build_job_discovered_signal_payload_never_duplicates_job_content() -> None:
     payload = build_job_discovered_signal_payload(
         company_id="company-1", source_url="https://boards.greenhouse.io/acme/jobs/1",
