@@ -1248,10 +1248,12 @@ async def recheck_watch(watch_id: UUID, slug: str = Depends(require_admin)) -> d
         if decision.decision == "RECHECK" and watch["opportunity_id"]:
             await session.execute(text("""
                 UPDATE opportunities SET status='RECHECK',
-                  evidence=evidence || CAST(:evidence AS jsonb), updated_at=now()
+                  evidence=evidence || CAST(:evidence AS jsonb), brain_confidence=:confidence,
+                  evaluated_at=now(), brain_version=:brain_version, updated_at=now()
                 WHERE id=:opportunity_id AND organization_id=:organization_id
             """), {"opportunity_id": watch["opportunity_id"], "organization_id": org_id,
-                   "evidence": json.dumps({"brain": decision.as_dict()})})
+                   "evidence": json.dumps({"brain": decision.as_dict()}),
+                   "confidence": decision.confidence, "brain_version": BRAIN_VERSION})
         await session.commit()
     return {**decision.as_dict(), "watch_id": watch_id, "next_check_days": next_check_days}
 

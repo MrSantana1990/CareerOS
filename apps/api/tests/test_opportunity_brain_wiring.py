@@ -65,6 +65,18 @@ def test_recheck_watch_route_only_moves_opportunity_to_recheck_status_when_mater
     assert 'if decision.decision == "RECHECK" and watch["opportunity_id"]:' in body
 
 
+def test_recheck_watch_route_stamps_brain_columns_on_the_opportunity_too():
+    # Achado real na validacao em producao do Prompt 4: o RECHECK atualizava
+    # status/evidence da Opportunity mas deixava evaluated_at/brain_confidence/
+    # brain_version nulos, inconsistente com /jobs/evaluate e /signals/evaluate.
+    body = _route_body(_career_source(), "/watches/{watch_id}/recheck")
+    recheck_start = body.index("if decision.decision == \"RECHECK\"")
+    recheck_block = body[recheck_start:]
+    assert "brain_confidence=:confidence" in recheck_block
+    assert "evaluated_at=now()" in recheck_block
+    assert "brain_version=:brain_version" in recheck_block
+
+
 # JOB_DISCOVERED gap (Secao 22): resolvido cirurgicamente dentro de
 # ingest_job (mesma transacao, sem tocar o outbox do automation-host) - so
 # para eventos NOVOS, nunca em massa para o historico, e nunca duplicando
