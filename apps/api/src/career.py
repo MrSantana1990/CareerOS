@@ -17,6 +17,9 @@ from .quality import job_fingerprint, match_radars, normalize, score_job, transi
 from .preparation import application_strategy, idempotency_key, prepare_email_draft, route_resume
 from .communications import correlate_message, notification_priority
 from .market_memory import opportunity_fingerprint, signal_fingerprint, watch_fingerprint
+from .opportunity_brain import (BRAIN_VERSION, BrainDecision, evaluate_job_opportunity,
+                                 evaluate_signal_opportunity, evaluate_watch_recheck,
+                                 opportunity_type_for_signal)
 
 router = APIRouter(prefix="/api/v1", tags=["career"])
 
@@ -631,6 +634,28 @@ async def ingest_job(payload: JobInput, slug: str = Depends(require_admin)) -> d
             VALUES (gen_random_uuid(), :organization_id, :job_id, :source, :external_id, :source_url)
             ON CONFLICT (organization_id, source, source_url) DO UPDATE SET last_seen_at=now()
         """), {**values, "job_id": job_id})
+        if created:
+            # JOB_DISCOVERED provenance (Secao 22, Prompt 4): o gap deixado
+            # pelo Prompt 3 (build_job_discovered_signal_payload implementado
+            # mas nao conectado) e resolvido aqui, cirurgicamente, sem tocar
+            # o outbox do automation-host - company_id e job_id ja estao
+            # resolvidos neste mesmo ponto de ingest_job, entao criar o
+            # Signal aqui e uma linha a mais na MESMA transacao, nao uma
+            # nova integracao de rede. So para o evento NOVO (created=True),
+            # nunca em massa para o historico (Secao 12/22). Provenance
+            # pura: so source_url/headline/evidence com a fingerprint, nunca
+            # uma copia da descricao/requisitos (Job continua o registro
+            # canonico).
+            signal_fp = signal_fingerprint(str(company_id), "JOB_DISCOVERED", payload.source_url)
+            await session.execute(text("""
+                INSERT INTO signals (id, organization_id, company_id, type, source_url, source_type,
+                  headline, confidence, evidence, dedup_fingerprint)
+                VALUES (gen_random_uuid(), :organization_id, :company_id, 'JOB_DISCOVERED', :source_url,
+                  'JOB_BOARD', :headline, 90, CAST(:evidence AS jsonb), :dedup_fingerprint)
+                ON CONFLICT (organization_id, dedup_fingerprint) DO NOTHING
+            """), {"organization_id": org_id, "company_id": company_id, "source_url": payload.source_url,
+                   "headline": payload.title[:300], "evidence": json.dumps({"job_fingerprint": fingerprint}),
+                   "dedup_fingerprint": signal_fp})
         await session.commit()
     return {"id": job_id, "fingerprint": fingerprint, "created": created, "deduplicated": not created}
 
@@ -1002,6 +1027,233 @@ async def calculate_job_score(job_id: UUID, slug: str = Depends(require_admin)) 
             """), {"organization_id": org_id, "job_id": job_id, "summary": json.dumps(result.as_dict())})
         await session.commit()
     return result.as_dict()
+
+
+_DECISION_TO_OPPORTUNITY_STATUS = {
+    "DROP": "DROPPED", "BLOCK": "BLOCKED", "WATCH": "WATCH", "RECHECK": "RECHECK",
+    "PREPARE": "PREPARED", "ACTIONABLE": "ACTIONABLE", "HUMAN_REQUIRED": "HUMAN_REQUIRED",
+}
+_TERMINAL_OPPORTUNITY_STATUSES = {"APPLIED", "CLOSED"}
+
+
+async def _has_prior_interaction(session, org_id: UUID, company_id: UUID) -> bool:
+    """Secao 3: interacao historica real (Application/Opportunity ja
+    aplicada) e evidencia forte de relevancia de Company."""
+    row = await session.scalar(text("""
+        SELECT 1 FROM opportunities
+        WHERE organization_id=:organization_id AND company_id=:company_id
+          AND status IN ('APPLIED','CLOSED') LIMIT 1
+    """), {"organization_id": org_id, "company_id": company_id})
+    return bool(row)
+
+
+@router.post("/jobs/{job_id}/evaluate")
+async def evaluate_job(job_id: UUID, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Opportunity Brain (Fase 2, Prompt 4) - Job -> Opportunity (Secao 21).
+    Reusa Score V2 (score_job) como fonte de eligibility/fit tecnico -
+    nao recria um segundo score redundante (Secao 16, decisao A). Idempotente
+    via dedup_fingerprint (company+JOB_APPLICATION+job); Opportunity ja
+    APPLIED/CLOSED nunca e reprocessada (Secao 29 - regressao Deutsche Bank)."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        job = (await session.execute(text(
+            "SELECT * FROM jobs WHERE id=:id AND organization_id=:organization_id AND deleted_at IS NULL"
+        ), {"id": job_id, "organization_id": org_id})).mappings().first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Vaga não encontrada.")
+        if not job["company_id"]:
+            decision = BrainDecision(decision="HUMAN_REQUIRED", eligibility="COMPANY_UNRESOLVED",
+                                      fit_score=None, confidence=50, reasons=["job_has_no_company_id"])
+            return {**decision.as_dict(), "opportunity_id": None, "created": False}
+
+        profile = (await session.execute(text(
+            "SELECT city, work_models, target_roles, salary_expectation, language_levels "
+            "FROM candidate_profiles WHERE organization_id=:organization_id AND deleted_at IS NULL LIMIT 1"
+        ), {"organization_id": org_id})).mappings().first() or {}
+        skills = [dict(row) for row in (await session.execute(text(
+            "SELECT name, level, verified, years_experience FROM skills "
+            "WHERE organization_id=:organization_id AND deleted_at IS NULL"
+        ), {"organization_id": org_id})).mappings()]
+        codes = set((await session.scalars(text(
+            "SELECT code FROM career_rules WHERE organization_id=:organization_id AND enabled=true AND deleted_at IS NULL"
+        ), {"organization_id": org_id})).all())
+
+        profile_data = dict(profile)
+        profile_data["verified_skills"] = [item["name"] for item in skills if item.get("verified")]
+        salary_text = str(profile_data.get("salary_expectation") or "")
+        salary_number = "".join(character for character in salary_text if character.isdigit() or character in ".,")
+        try:
+            profile_data["salary_expectation_numeric"] = float(salary_number.replace(".", "").replace(",", "."))
+        except ValueError:
+            profile_data["salary_expectation_numeric"] = 0
+
+        # job_scores (persistido por /jobs/{id}/score) guarda reasons como uma
+        # lista ja achatada (strengths+risks+blocking_rules+radars) - nao da
+        # para desmontar de volta com seguranca. score_job e puro/determinista
+        # e barato (sem I/O), entao recalcular aqui com os mesmos inputs e
+        # mais confiavel que tentar reconstruir o ScoreResult a partir do
+        # jsonb persistido (Secao 16: Brain usa os componentes do Score V2).
+        score_result = score_job(dict(job), profile_data, codes)
+
+        fingerprint = opportunity_fingerprint(str(job["company_id"]), "JOB_APPLICATION", str(job_id), None)
+        existing = (await session.execute(text(
+            "SELECT id, status FROM opportunities WHERE organization_id=:organization_id AND dedup_fingerprint=:fingerprint"
+        ), {"organization_id": org_id, "fingerprint": fingerprint})).mappings().first()
+        already_terminal = bool(existing and existing["status"] in _TERMINAL_OPPORTUNITY_STATUSES)
+
+        channels = []
+        if existing:
+            channels = [dict(row) for row in (await session.execute(text(
+                "SELECT status, requires_auth, requires_captcha, requires_human FROM opportunity_channels "
+                "WHERE organization_id=:organization_id AND opportunity_id=:opportunity_id"
+            ), {"organization_id": org_id, "opportunity_id": existing["id"]})).mappings()]
+
+        decision = evaluate_job_opportunity(
+            job=dict(job), profile=profile_data, candidate_skills=skills, score_result=score_result,
+            structured_extraction=dict(job["structured_extraction"]) if job["structured_extraction"] else None,
+            channels=channels, already_terminal=already_terminal,
+        )
+
+        if already_terminal:
+            return {**decision.as_dict(), "opportunity_id": existing["id"], "created": False}
+
+        status = _DECISION_TO_OPPORTUNITY_STATUS[decision.decision]
+        row = (await session.execute(text("""
+            INSERT INTO opportunities (id, organization_id, company_id, job_id, type, status,
+              discovery_source, dedup_fingerprint, evidence, fit_score, brain_confidence,
+              evaluated_at, brain_version)
+            VALUES (gen_random_uuid(), :organization_id, :company_id, :job_id, 'JOB_APPLICATION', :status,
+              'OPPORTUNITY_BRAIN', :fingerprint, CAST(:evidence AS jsonb), :fit_score, :confidence,
+              now(), :brain_version)
+            ON CONFLICT (organization_id, dedup_fingerprint) DO UPDATE SET
+              status=EXCLUDED.status, evidence=opportunities.evidence || EXCLUDED.evidence,
+              fit_score=EXCLUDED.fit_score, brain_confidence=EXCLUDED.brain_confidence,
+              evaluated_at=now(), brain_version=EXCLUDED.brain_version, updated_at=now()
+            RETURNING id, (xmax = 0) AS created
+        """), {"organization_id": org_id, "company_id": job["company_id"], "job_id": job_id,
+               "status": status, "fingerprint": fingerprint, "evidence": json.dumps({"brain": decision.as_dict()}),
+               "fit_score": decision.fit_score, "confidence": decision.confidence,
+               "brain_version": BRAIN_VERSION})).mappings().one()
+        await session.commit()
+    return {**decision.as_dict(), "opportunity_id": row["id"], "created": row["created"]}
+
+
+@router.post("/signals/{signal_id}/evaluate")
+async def evaluate_signal(signal_id: UUID, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Opportunity Brain - Signal -> Opportunity (Secao 20). So promove
+    Signals TRUSTED_RESOLVED e relevantes; nunca fabrica candidatura
+    espontanea automatica a partir de um Signal (Secao 30, regressao Nubank)."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        signal = (await session.execute(text(
+            "SELECT * FROM signals WHERE id=:id AND organization_id=:organization_id"
+        ), {"id": signal_id, "organization_id": org_id})).mappings().first()
+        if not signal:
+            raise HTTPException(status_code=404, detail="Signal não encontrado.")
+
+        company = None
+        related_signals: list[dict] = []
+        has_prior = False
+        if signal["company_id"]:
+            company = (await session.execute(text(
+                "SELECT br_presence, careers_url, ats_type FROM companies WHERE id=:id"
+            ), {"id": signal["company_id"]})).mappings().first()
+            related_signals = [dict(row) for row in (await session.execute(text(
+                "SELECT type, confidence FROM signals WHERE organization_id=:organization_id "
+                "AND company_id=:company_id AND id != :signal_id"
+            ), {"organization_id": org_id, "company_id": signal["company_id"], "signal_id": signal_id})).mappings()]
+            has_prior = await _has_prior_interaction(session, org_id, signal["company_id"])
+
+        decision = evaluate_signal_opportunity(signal=dict(signal), company=dict(company) if company else None,
+                                                related_signals=related_signals, has_prior_interaction=has_prior)
+
+        if decision.decision != "WATCH":
+            new_signal_status = "DISCARDED" if decision.eligibility == "SIGNAL_QUALITY_GATE" else signal["status"]
+            if new_signal_status != signal["status"]:
+                await session.execute(text("UPDATE signals SET status=:status, updated_at=now() WHERE id=:id"),
+                                       {"status": new_signal_status, "id": signal_id})
+                await session.commit()
+            return {**decision.as_dict(), "opportunity_id": None}
+
+        opportunity_type = opportunity_type_for_signal(signal["type"])
+        fingerprint = opportunity_fingerprint(str(signal["company_id"]), opportunity_type, None, str(signal_id))
+        opp_row = (await session.execute(text("""
+            INSERT INTO opportunities (id, organization_id, company_id, signal_id, type, status,
+              discovery_source, dedup_fingerprint, evidence, fit_score, brain_confidence,
+              evaluated_at, brain_version)
+            VALUES (gen_random_uuid(), :organization_id, :company_id, :signal_id, :type, 'WATCH',
+              'OPPORTUNITY_BRAIN', :fingerprint, CAST(:evidence AS jsonb), NULL, :confidence,
+              now(), :brain_version)
+            ON CONFLICT (organization_id, dedup_fingerprint) DO UPDATE SET
+              evidence=opportunities.evidence || EXCLUDED.evidence, brain_confidence=EXCLUDED.brain_confidence,
+              evaluated_at=now(), brain_version=EXCLUDED.brain_version, updated_at=now()
+            RETURNING id, (xmax = 0) AS created
+        """), {"organization_id": org_id, "company_id": signal["company_id"], "signal_id": signal_id,
+               "type": opportunity_type, "fingerprint": fingerprint,
+               "evidence": json.dumps({"brain": decision.as_dict()}), "confidence": decision.confidence,
+               "brain_version": BRAIN_VERSION})).mappings().one()
+
+        watch_fp = watch_fingerprint(str(signal["company_id"]), str(opp_row["id"]))
+        await session.execute(text("""
+            INSERT INTO watches (id, organization_id, company_id, opportunity_id, reason,
+              next_check_at, dedup_fingerprint, evidence)
+            VALUES (gen_random_uuid(), :organization_id, :company_id, :opportunity_id, :reason,
+              now() + interval '30 days', :fingerprint, CAST(:evidence AS jsonb))
+            ON CONFLICT (organization_id, dedup_fingerprint) DO UPDATE SET
+              reason=EXCLUDED.reason, evidence=watches.evidence || EXCLUDED.evidence, updated_at=now()
+        """), {"organization_id": org_id, "company_id": signal["company_id"], "opportunity_id": opp_row["id"],
+               "reason": "; ".join(decision.reasons) or "Opportunity Brain: sinal relevante sem ação concreta hoje.",
+               "fingerprint": watch_fp, "evidence": json.dumps({"brain": decision.as_dict()})})
+        await session.execute(text("UPDATE signals SET status='PROMOTED', updated_at=now() WHERE id=:id"),
+                               {"id": signal_id})
+        await session.commit()
+    return {**decision.as_dict(), "opportunity_id": opp_row["id"], "created": opp_row["created"]}
+
+
+@router.post("/watches/{watch_id}/recheck")
+async def recheck_watch(watch_id: UUID, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Opportunity Brain - Recheck (Secao 24). Nao inicia scheduler novo
+    (gap conhecido, Secao 23) - reavaliacao e sob demanda nesta entrega."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        watch = (await session.execute(text(
+            "SELECT * FROM watches WHERE id=:id AND organization_id=:organization_id"
+        ), {"id": watch_id, "organization_id": org_id})).mappings().first()
+        if not watch:
+            raise HTTPException(status_code=404, detail="Watch não encontrado.")
+
+        company = (await session.execute(text(
+            "SELECT br_presence, careers_url, ats_type FROM companies WHERE id=:id"
+        ), {"id": watch["company_id"]})).mappings().first()
+        since = watch["last_checked_at"]
+        query = "SELECT type, confidence FROM signals WHERE organization_id=:organization_id AND company_id=:company_id"
+        params = {"organization_id": org_id, "company_id": watch["company_id"]}
+        if since:
+            query += " AND observed_at > :since"
+            params["since"] = since
+        new_signals = [dict(row) for row in (await session.execute(text(query), params)).mappings()]
+        has_prior = await _has_prior_interaction(session, org_id, watch["company_id"])
+
+        decision = evaluate_watch_recheck(new_signals=new_signals, company=dict(company) if company else None,
+                                           has_prior_interaction=has_prior)
+
+        next_check_days = 7 if decision.decision == "RECHECK" else 30
+        await session.execute(text("""
+            UPDATE watches SET last_checked_at=now(), check_count=check_count+1,
+              next_check_at=now() + make_interval(days => :days),
+              evidence=evidence || CAST(:evidence AS jsonb), updated_at=now()
+            WHERE id=:id
+        """), {"id": watch_id, "days": next_check_days, "evidence": json.dumps({"brain": decision.as_dict()})})
+
+        if decision.decision == "RECHECK" and watch["opportunity_id"]:
+            await session.execute(text("""
+                UPDATE opportunities SET status='RECHECK',
+                  evidence=evidence || CAST(:evidence AS jsonb), updated_at=now()
+                WHERE id=:opportunity_id AND organization_id=:organization_id
+            """), {"opportunity_id": watch["opportunity_id"], "organization_id": org_id,
+                   "evidence": json.dumps({"brain": decision.as_dict()})})
+        await session.commit()
+    return {**decision.as_dict(), "watch_id": watch_id, "next_check_days": next_check_days}
 
 
 @router.post("/applications/{application_id}/transition")
