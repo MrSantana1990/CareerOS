@@ -118,12 +118,19 @@ def build_job_discovered_signal_payload(*, company_id: str | None, source_url: s
 
 def resolve_company(title: str, known_company_names: list[str]) -> str | None:
     """Resolucao CONSERVADORA (secao 5): so vincula a uma Company que ja
-    existe no Core (substring case-insensitive do nome real) - nunca cria
-    nem adivinha uma empresa nova a partir de uma manchete. Sem match real,
-    retorna None e o Signal e persistido com company_id nulo (permitido
-    pelo schema desde o Prompt 2)."""
-    title_lower = title.lower()
-    matches = [name for name in known_company_names if len(name) >= 3 and name.lower() in title_lower]
+    existe no Core (match de PALAVRA INTEIRA, case-insensitive, do nome
+    real) - nunca cria nem adivinha uma empresa nova a partir de uma
+    manchete. Sem match real, retorna None e o Signal e persistido com
+    company_id nulo (permitido pelo schema desde o Prompt 2).
+
+    Achado real na validacao do Prompt 4 (amostra real de Signals em
+    producao): uma Company chamada "EXA" batia via substring simples em
+    toda manchete que terminava com "- Exame" (o nome da propria fonte
+    jornalistica, nao da empresa) - 9 dos ~15 Signals resolvidos da
+    amostra eram esse falso-positivo. Substring simples (`in`) nao respeita
+    fronteira de palavra; corrigido para exigir \\b nome \\b via regex."""
+    matches = [name for name in known_company_names
+               if len(name) >= 3 and re.search(rf"\b{re.escape(name.lower())}\b", title.lower())]
     if not matches:
         return None
     # Nome mais longo primeiro - evita casar um nome generico curto que e
