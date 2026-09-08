@@ -47,6 +47,17 @@ def test_salary_brl_extraction() -> None:
     assert result is not None
     assert result["value"]["salary_currency"] == "BRL"
     assert result["value"]["salary_min"] == 8000
+    assert result["value"]["salary_max"] is None
+
+
+def test_salary_brl_range_extraction() -> None:
+    # Achado real na validacao do Prompt 3 (InfoJobs): "R$ 4.330,00 a
+    # R$ 4.331,00" e uma faixa, nao um unico valor - salary_max precisa
+    # ser reportado quando o texto descreve uma faixa.
+    result = extract_salary("Salário de R$ 4.330,00 a R$ 4.331,00, CLT integral.")
+    assert result is not None
+    assert result["value"]["salary_min"] == 4330
+    assert result["value"]["salary_max"] == 4331
 
 
 def test_salary_usd_extraction() -> None:

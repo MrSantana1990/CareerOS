@@ -176,9 +176,21 @@ def extract_location(text: str) -> dict | None:
 def extract_salary(text: str) -> dict | None:
     brl = extract_salary_brl(text)
     if brl is not None:
-        match = re.search(r"R\$\s*([\d.]+)(?:,\d{2})?", text, re.IGNORECASE)
-        return {"value": {"salary_min": brl, "salary_currency": "BRL"}, "confidence": 85,
-                "evidence_snippet": _snippet(text, match.start(), match.end()) if match else None,
+        # extract_salary_brl (hard_blocks.py) so devolve o minimo (o
+        # suficiente pro proposito de hard-block de piso salarial) -
+        # aqui capturamos os mesmos valores validos de novo, isolado,
+        # para tambem reportar salary_max quando o texto descreve uma
+        # faixa ("R$ 4.330,00 a R$ 4.331,00"), sem alterar o contrato
+        # da funcao compartilhada usada por assess_hard_blocks.
+        matches = [m for m in re.finditer(r"R\$\s*([\d.]+)(?:,\d{2})?", text, re.IGNORECASE)
+                   if m.group(1).replace(".", "").isdigit()
+                   and 1000 <= int(m.group(1).replace(".", "")) <= 100000]
+        amounts = [int(m.group(1).replace(".", "")) for m in matches]
+        salary_max = max(amounts) if len(amounts) > 1 and max(amounts) != brl else None
+        first_match = matches[0] if matches else None
+        return {"value": {"salary_min": brl, "salary_max": salary_max, "salary_currency": "BRL"},
+                "confidence": 85,
+                "evidence_snippet": _snippet(text, first_match.start(), first_match.end()) if first_match else None,
                 "extraction_method": "regex_brl"}
     usd_match = _SALARY_USD.search(text)
     if usd_match:
