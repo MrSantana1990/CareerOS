@@ -179,6 +179,23 @@ def test_o_application_plan_carries_resume_hash():
     assert plan["resume_version_id"] == "r1"
 
 
+def test_o_application_plan_is_json_serializable_with_real_uuid_resume_id():
+    # Bug real encontrado em producao (Prompt 5): resume["id"] vem do
+    # Postgres como um objeto uuid.UUID de verdade (nao uma string) via
+    # asyncpg/SQLAlchemy - json.dumps(plan) quebrava com "Object of type
+    # UUID is not JSON serializable" para toda Opportunity com Job (as 10
+    # JOB_APPLICATION reais na amostra de validacao).
+    import json
+    import uuid
+
+    policy = _base_policy(product_auto_apply_enabled=True)
+    resume = {"id": uuid.uuid4(), "sha256": "deadbeef"}
+    plan = build_application_plan(opportunity_id="op1", job_id="job1", channel=None,
+                                   resume=resume, policy_result=policy)
+    assert isinstance(plan["resume_version_id"], str)
+    json.dumps(plan)  # nao pode levantar TypeError
+
+
 # P: Application Plan idempotent -------------------------------------------------------------------
 
 def test_p_application_plan_idempotency_key_is_stable_for_same_inputs():

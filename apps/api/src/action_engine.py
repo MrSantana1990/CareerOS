@@ -314,7 +314,7 @@ def build_application_plan(*, opportunity_id: str, job_id: str | None, channel: 
         "opportunity_id": opportunity_id,
         "job_id": job_id,
         "channel": {"type": channel.get("type"), "url_or_email": channel.get("url_or_email")} if channel else None,
-        "resume_version_id": resume.get("id") if resume else None,
+        "resume_version_id": str(resume["id"]) if resume and resume.get("id") else None,
         "resume_hash": resume.get("sha256") if resume else None,
         "action_decision": policy_result.action_decision,
         "autonomy_class": policy_result.autonomy_class,
