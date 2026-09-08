@@ -1952,6 +1952,7 @@ async def startup_scheduler() -> None:
     asyncio.create_task(google_mail_scheduler())
     asyncio.create_task(core_sync_scheduler())
     asyncio.create_task(market_scan_scheduler())
+    asyncio.create_task(watch_recheck_scheduler())
 
 
 @app.get("/health")
@@ -2225,6 +2226,72 @@ async def market_scan_scheduler() -> None:
                 await market_scan()
             except Exception as exc:
                 event("MARKET_SCAN_FAILED", error=type(exc).__name__)
+        await asyncio.sleep(60)
+
+
+def _fetch_due_watches() -> list[dict]:
+    request = Request(CAREER_API_URL + "/api/v1/watches?due=true&limit=50",
+                       headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}"})
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _recheck_watch(watch_id: str) -> dict:
+    request = Request(CAREER_API_URL + f"/api/v1/watches/{watch_id}/recheck",
+                       data=b"{}", method="POST",
+                       headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"})
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+async def watch_recheck_due() -> dict:
+    """Fase 2, Prompt 5, Secao 24 - conecta Watches due ao scheduler
+    existente (nenhum daemon novo, mesmo padrao de market_scan/
+    google_mail/core_sync). AUTO_SAFE only: recheck->Brain->persist so
+    reavalia estado (WATCH/RECHECK), nunca produz uma candidatura aqui -
+    isso exigiria passar por Action Policy (POST /opportunities/{id}/
+    action-plan), fora do escopo desta rotina."""
+    if not CAREER_ADMIN_TOKEN:
+        event("WATCH_RECHECK_SKIPPED", reason="missing_admin_token")
+        return {"due": 0}
+    started = datetime.now(UTC)
+    event("WATCH_RECHECK_STARTED")
+    metrics = {"due": 0, "rechecked": 0, "errors": 0}
+    try:
+        due_watches = await asyncio.to_thread(_fetch_due_watches)
+        metrics["due"] = len(due_watches)
+        for watch in due_watches:
+            try:
+                result = await asyncio.to_thread(_recheck_watch, watch["id"])
+                metrics["rechecked"] += 1
+                event("WATCH_RECHECKED", watch_id=watch["id"], decision=result.get("decision"))
+            except Exception as item_error:
+                metrics["errors"] += 1
+                event("WATCH_RECHECK_ITEM_FAILED", watch_id=watch.get("id"), error=type(item_error).__name__)
+        metrics["duration_seconds"] = (datetime.now(UTC) - started).total_seconds()
+        event("WATCH_RECHECK_COMPLETED", **metrics)
+        return metrics
+    except Exception as exc:
+        metrics["errors"] += 1
+        metrics["duration_seconds"] = (datetime.now(UTC) - started).total_seconds()
+        event("WATCH_RECHECK_FAILED", error=type(exc).__name__, **metrics)
+        return metrics
+
+
+async def watch_recheck_scheduler() -> None:
+    """1x/dia, as 7h - depois do market_scan (6h) e antes do daily_scheduler
+    (8h), para que Watches sejam reavaliados com o Signal mais recente do
+    dia antes do pipeline tradicional comecar."""
+    last_slot = ""
+    while True:
+        now = datetime.now().astimezone()
+        slot = now.date().isoformat()
+        if now.hour == 7 and slot != last_slot:
+            last_slot = slot
+            try:
+                await watch_recheck_due()
+            except Exception as exc:
+                event("WATCH_RECHECK_FAILED", error=type(exc).__name__)
         await asyncio.sleep(60)
 
 

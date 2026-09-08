@@ -13,7 +13,10 @@ from sqlalchemy import text
 
 from .database import SessionLocal
 from .auth import require_admin
-from .quality import job_fingerprint, match_radars, normalize, score_job, transition_allowed
+from .quality import MINIMUM_ACCEPTABLE_SALARY_BRL, job_fingerprint, match_radars, normalize, score_job, transition_allowed
+from .action_engine import (assess_language_status, build_application_plan, classify_channel_trust,
+                             classify_profile_completeness, evaluate_action_policy,
+                             is_profile_completeness_sufficient, select_channel)
 from .preparation import application_strategy, idempotency_key, prepare_email_draft, route_resume
 from .communications import correlate_message, notification_priority
 from .market_memory import opportunity_fingerprint, signal_fingerprint, watch_fingerprint
@@ -212,8 +215,11 @@ class CommunicationBatch(BaseModel):
 
 class InterventionInput(BaseModel):
     application_id: UUID | None = None
+    opportunity_id: UUID | None = None
     executor_id: str = Field(min_length=2, max_length=100)
-    reason: Literal["CAPTCHA", "MFA", "LOGIN", "UNKNOWN_FIELD", "SUBMISSION_UNCONFIRMED", "LAYOUT_CHANGED"]
+    reason: Literal["CAPTCHA", "MFA", "LOGIN", "UNKNOWN_FIELD", "SUBMISSION_UNCONFIRMED", "LAYOUT_CHANGED",
+                    "AUTH_REQUIRED", "MISSING_PROFILE_DATA", "SENSITIVE_FIELD_REQUIRED",
+                    "MATERIAL_UNKNOWN", "FINAL_APPROVAL"]
     title: str = Field(min_length=3, max_length=240)
     instructions: str = Field(min_length=3, max_length=2000)
     page_url: str | None = Field(default=None, max_length=1000)
@@ -1258,6 +1264,175 @@ async def recheck_watch(watch_id: UUID, slug: str = Depends(require_admin)) -> d
     return {**decision.as_dict(), "watch_id": watch_id, "next_check_days": next_check_days}
 
 
+def environment_auto_apply_enabled_for_api() -> bool:
+    """Secao 10: gate de produto explicito, separado de policy eligible -
+    lido diretamente do ambiente do container api (mesmo nome de variavel
+    ja usado pelo automation-host), nunca de um valor 'esquecido' em codigo."""
+    return os.getenv("AUTO_APPLY_ENABLED", "false").strip().lower() == "true"
+
+
+def _aggregate_channel_trust(channels: list[dict]) -> tuple[str | None, dict | None]:
+    """Prioriza o pior caso material (CAPTCHA/AUTH) sobre um canal
+    VERIFIED_AVAILABLE que porventura tambem exista, e so devolve um canal
+    selecionado quando ha um VERIFIED_AVAILABLE de verdade (Secao 6/7)."""
+    if not channels:
+        return None, None
+    trusts = [(item, classify_channel_trust(item)) for item in channels]
+    if any(trust == "CAPTCHA_REQUIRED" for _, trust in trusts):
+        return "CAPTCHA_REQUIRED", None
+    if any(trust == "AUTH_REQUIRED" for _, trust in trusts):
+        return "AUTH_REQUIRED", None
+    selected = select_channel(channels)
+    if selected:
+        return "VERIFIED_AVAILABLE", selected
+    for _, trust in trusts:
+        if trust in {"BOT_GATED", "STALE", "UNVERIFIABLE", "UNAVAILABLE"}:
+            return trust, None
+    return "UNVERIFIABLE", None
+
+
+@router.post("/opportunities/{opportunity_id}/action-plan")
+async def create_action_plan(opportunity_id: UUID, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Action Engine (Fase 2, Prompt 5) - camada de DECISAO de acao, nunca
+    de execucao. Sempre DRY RUN: nenhuma linha aqui envia e-mail, clica em
+    formulario ou muda estado externo - so calcula e persiste um Application
+    Plan auditavel, e cria Human Intervention quando necessario. A execucao
+    real (send_application_email / automacao de browser existentes)
+    continua inteiramente fora deste endpoint, atras de AUTO_APPLY_ENABLED
+    e de uma acao humana explicita e pontual."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        opportunity = (await session.execute(text(
+            "SELECT * FROM opportunities WHERE id=:id AND organization_id=:organization_id"
+        ), {"id": opportunity_id, "organization_id": org_id})).mappings().first()
+        if not opportunity:
+            raise HTTPException(status_code=404, detail="Opportunity não encontrada.")
+
+        brain = dict(opportunity["evidence"] or {}).get("brain") or {}
+        brain_decision = brain.get("decision", opportunity["status"])
+        hard_blocks = list(brain.get("hard_blocks") or [])
+        unknowns = list(brain.get("unknowns") or [])
+
+        job = None
+        if opportunity["job_id"]:
+            job = (await session.execute(text(
+                "SELECT * FROM jobs WHERE id=:id AND organization_id=:organization_id"
+            ), {"id": opportunity["job_id"], "organization_id": org_id})).mappings().first()
+
+        salary_known = bool(job and job["salary_min"] is not None)
+        salary_below_floor = bool(job and job["salary_min"] is not None
+                                   and float(job["salary_min"]) < MINIMUM_ACCEPTABLE_SALARY_BRL)
+        location_work_model_blocked = any(item in hard_blocks for item in
+                                           ("RELOCATION_REQUIRED_IMPLICIT", "RELOCATION_REQUIRED"))
+        language_incompatible = "LANGUAGE_GAP" in hard_blocks
+
+        channels = [dict(row) for row in (await session.execute(text(
+            "SELECT * FROM opportunity_channels WHERE organization_id=:organization_id AND opportunity_id=:opportunity_id"
+        ), {"organization_id": org_id, "opportunity_id": opportunity_id})).mappings()]
+        channel_trust, selected_channel = _aggregate_channel_trust(channels)
+
+        profile = dict((await session.execute(text(
+            "SELECT city, state, work_models, target_roles, salary_expectation, language_levels, "
+            "headline, linkedin_url, approved_answers FROM candidate_profiles "
+            "WHERE organization_id=:organization_id AND deleted_at IS NULL LIMIT 1"
+        ), {"organization_id": org_id})).mappings().first() or {})
+        skills = [dict(row) for row in (await session.execute(text("""
+            SELECT s.name, s.verified,
+                   (SELECT count(*) FROM skill_evidence e WHERE e.skill_id=s.id AND e.deleted_at IS NULL) AS evidence_count
+            FROM skills s WHERE s.organization_id=:organization_id AND s.deleted_at IS NULL
+        """), {"organization_id": org_id})).mappings()]
+        resumes = [dict(row) for row in (await session.execute(text("""
+            SELECT rv.id, rv.sha256, rv.approved_at, r.family, r.language, r.active
+            FROM resume_versions rv JOIN resumes r ON r.id=rv.resume_id
+            WHERE rv.organization_id=:organization_id AND r.deleted_at IS NULL
+        """), {"organization_id": org_id})).mappings()]
+
+        resume: dict | None = None
+        if job:
+            resume = route_resume(dict(job), resumes)
+        completeness = classify_profile_completeness(profile, skills, resumes)
+        completeness_ok = is_profile_completeness_sufficient(completeness)
+
+        language_status = assess_language_status(profile)
+        if language_status["needs_intervention"]:
+            # Secao 2: intervencao de PERFIL (nao de uma Opportunity especifica) -
+            # a mesma deduplication_key para toda avaliacao garante uma unica
+            # linha persistente ate o usuario declarar o nivel real.
+            await _create_or_reuse_intervention(session, org_id, InterventionInput(
+                executor_id="action-engine", reason="MISSING_PROFILE_DATA",
+                title=language_status["intervention_title"],
+                instructions=language_status["intervention_instructions"],
+                evidence={"deduplication_key": "profile:language_declaration"},
+            ))
+
+        duplicate_exists = bool((await session.scalar(text("""
+            SELECT 1 FROM applications
+            WHERE organization_id=:organization_id
+              AND ((job_id=:job_id AND :job_id IS NOT NULL) OR opportunity_id=:opportunity_id)
+              AND status IN ('SENT','CONFIRMED','RECRUITER_RESPONSE','INTERVIEW','TECHNICAL_TEST',
+                              'FINAL_STAGE','OFFER')
+            LIMIT 1
+        """), {"organization_id": org_id, "job_id": opportunity["job_id"], "opportunity_id": opportunity_id})))
+        attempt_cap_reached = bool((await session.scalar(text("""
+            SELECT count(*) FROM applications
+            WHERE organization_id=:organization_id
+              AND ((job_id=:job_id AND :job_id IS NOT NULL) OR opportunity_id=:opportunity_id)
+              AND status IN ('SUBMITTING','ERROR')
+        """), {"organization_id": org_id, "job_id": opportunity["job_id"],
+               "opportunity_id": opportunity_id})) or 0) >= 1
+
+        policy = evaluate_action_policy(
+            brain_decision=brain_decision, hard_blocks=hard_blocks, unknowns=unknowns,
+            salary_known=salary_known, salary_below_floor=salary_below_floor,
+            location_work_model_blocked=location_work_model_blocked,
+            language_incompatible=language_incompatible, channel_trust=channel_trust,
+            resume_available=bool(resume) if job else True, duplicate_exists=duplicate_exists,
+            sensitive_missing=[], attempt_cap_reached=attempt_cap_reached,
+            profile_completeness_sufficient=completeness_ok,
+            product_auto_apply_enabled=environment_auto_apply_enabled_for_api(),
+        )
+        plan = build_application_plan(
+            opportunity_id=str(opportunity_id), job_id=str(opportunity["job_id"]) if opportunity["job_id"] else None,
+            channel=selected_channel, resume=resume, policy_result=policy,
+            evidence={"profile_completeness": completeness, "channel_trust": channel_trust},
+        )
+
+        await session.execute(text("""
+            UPDATE opportunities SET evidence=evidence || CAST(:evidence AS jsonb), updated_at=now()
+            WHERE id=:id AND organization_id=:organization_id
+        """), {"id": opportunity_id, "organization_id": org_id, "evidence": json.dumps({"action_plan": plan})})
+
+        intervention = None
+        if policy.human_requirements:
+            requirements = set(policy.human_requirements)
+            # Prioridade explicita, sem heuristica sobre o formato da string
+            # (Secao 22 - cada item carrega contexto suficiente para
+            # resolver uma vez): CAPTCHA/AUTH sao sempre o motivo mais
+            # concreto quando presentes; PROFILE_COMPLETENESS/RESUME_SELECTION/
+            # language_level_unknown sao dados de perfil faltando; o resto
+            # (requisito material incerto da propria vaga) vira MATERIAL_UNKNOWN.
+            if "CAPTCHA" in requirements:
+                reason = "CAPTCHA"
+            elif "AUTH_REQUIRED" in requirements:
+                reason = "AUTH_REQUIRED"
+            elif "FINAL_APPROVAL" in requirements:
+                reason = "FINAL_APPROVAL"
+            elif requirements & {"PROFILE_COMPLETENESS", "RESUME_SELECTION", "language_level_unknown"}:
+                reason = "MISSING_PROFILE_DATA"
+            else:
+                reason = "MATERIAL_UNKNOWN"
+            intervention_payload = InterventionInput(
+                opportunity_id=opportunity_id, executor_id="action-engine",
+                reason=reason, title=f"Ação requer decisão humana — {reason}",
+                instructions="; ".join(policy.human_requirements) or "Revisão manual necessária.",
+                evidence={"deduplication_key": f"action-plan:{opportunity_id}:{reason}",
+                          "policy_result": policy.as_dict()},
+            )
+            intervention = await _create_or_reuse_intervention(session, org_id, intervention_payload)
+        await session.commit()
+    return {"plan": plan, "intervention": intervention}
+
+
 @router.post("/applications/{application_id}/transition")
 async def transition_application(application_id: UUID, payload: TransitionInput, slug: str = Depends(require_admin)) -> dict[str, str]:
     org_id = await organization_id(slug)
@@ -1908,44 +2083,52 @@ async def update_analytics_goals(payload: CareerGoalInput,
     return dict(row)
 
 
+async def _create_or_reuse_intervention(session, org_id: UUID, payload: InterventionInput) -> dict:
+    """Compartilhado entre a rota HTTP /interventions e o Action Engine
+    (Prompt 5) - mesma logica de dedup (evidence.deduplication_key) e
+    notificacao, nunca duplicada."""
+    existing = (await session.execute(text("""
+        SELECT id, reason, status, title, instructions, page_url, created_at
+        FROM human_interventions
+        WHERE organization_id=:organization_id AND executor_id=:executor_id
+          AND reason=:reason AND status='PENDING'
+          AND evidence->>'deduplication_key'=:deduplication_key
+        ORDER BY created_at DESC LIMIT 1
+    """), {"organization_id": org_id, "executor_id": payload.executor_id,
+            "reason": payload.reason,
+            "deduplication_key": str(payload.evidence.get("deduplication_key", ""))})).mappings().first()
+    if existing and payload.evidence.get("deduplication_key"):
+        return dict(existing)
+    row = (await session.execute(text("""
+        INSERT INTO human_interventions
+          (id, organization_id, application_id, opportunity_id, executor_id, reason, title,
+           instructions, page_url, evidence)
+        VALUES (gen_random_uuid(), :organization_id, :application_id, :opportunity_id, :executor_id,
+                :reason, :title, :instructions, :page_url, CAST(:evidence AS jsonb))
+        RETURNING id, reason, status, title, instructions, page_url, created_at
+    """), {**payload.model_dump(exclude={"evidence"}), "organization_id": org_id,
+            "evidence": json.dumps(payload.evidence)})).mappings().one()
+    await session.execute(text("""
+        INSERT INTO career_notifications
+          (id, organization_id, application_id, kind, title, body, priority,
+           deduplication_key)
+        VALUES (gen_random_uuid(), :organization_id, :application_id,
+                'HUMAN_INTERVENTION', :title, :body, 'URGENT', :key)
+        ON CONFLICT (organization_id, deduplication_key) DO NOTHING
+    """), {"organization_id": org_id, "application_id": payload.application_id,
+            "title": payload.title, "body": payload.instructions,
+            "key": f"intervention:{row['id']}"})
+    return dict(row)
+
+
 @router.post("/interventions")
 async def create_intervention(payload: InterventionInput,
                               slug: str = Depends(require_admin)) -> dict[str, Any]:
     org_id = await organization_id(slug)
     async with SessionLocal() as session:
-        existing = (await session.execute(text("""
-            SELECT id, reason, status, title, instructions, page_url, created_at
-            FROM human_interventions
-            WHERE organization_id=:organization_id AND executor_id=:executor_id
-              AND reason=:reason AND status='PENDING'
-              AND evidence->>'deduplication_key'=:deduplication_key
-            ORDER BY created_at DESC LIMIT 1
-        """), {"organization_id": org_id, "executor_id": payload.executor_id,
-                "reason": payload.reason,
-                "deduplication_key": str(payload.evidence.get("deduplication_key", ""))})).mappings().first()
-        if existing and payload.evidence.get("deduplication_key"):
-            return dict(existing)
-        row = (await session.execute(text("""
-            INSERT INTO human_interventions
-              (id, organization_id, application_id, executor_id, reason, title,
-               instructions, page_url, evidence)
-            VALUES (gen_random_uuid(), :organization_id, :application_id, :executor_id,
-                    :reason, :title, :instructions, :page_url, CAST(:evidence AS jsonb))
-            RETURNING id, reason, status, title, instructions, page_url, created_at
-        """), {**payload.model_dump(exclude={"evidence"}), "organization_id": org_id,
-                "evidence": json.dumps(payload.evidence)})).mappings().one()
-        await session.execute(text("""
-            INSERT INTO career_notifications
-              (id, organization_id, application_id, kind, title, body, priority,
-               deduplication_key)
-            VALUES (gen_random_uuid(), :organization_id, :application_id,
-                    'HUMAN_INTERVENTION', :title, :body, 'URGENT', :key)
-            ON CONFLICT (organization_id, deduplication_key) DO NOTHING
-        """), {"organization_id": org_id, "application_id": payload.application_id,
-                "title": payload.title, "body": payload.instructions,
-                "key": f"intervention:{row['id']}"})
+        row = await _create_or_reuse_intervention(session, org_id, payload)
         await session.commit()
-    return dict(row)
+    return row
 
 
 @router.get("/interventions")
