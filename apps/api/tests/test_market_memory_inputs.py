@@ -1,8 +1,24 @@
+from datetime import datetime
+
 import pytest
 from pydantic import ValidationError
 
 from src.career import (CompanyInput, OpportunityChannelInput, OpportunityInput,
                          OpportunityStatusInput, SignalInput, WatchInput, WatchUpdateInput)
+
+
+def test_model_dump_keeps_datetime_fields_as_real_datetime_not_iso_string():
+    # Bug real encontrado em producao (Prompt 2): payload.model_dump(mode="json")
+    # serializa datetime para string ISO, mas asyncpg exige um objeto
+    # datetime.datetime de verdade para uma coluna timestamptz - "expected a
+    # datetime.date or datetime.datetime instance, got 'str'". Corrigido
+    # trocando para model_dump() puro nas 5 rotas novas; este teste garante
+    # que o campo nunca regride para string quando serializado dessa forma.
+    channel = OpportunityChannelInput(type="OFFICIAL_EMAIL", url_or_email="rh@empresa.com",
+                                       source="https://empresa.com/carreiras",
+                                       verified_at=datetime(2026, 9, 6))
+    dumped = channel.model_dump()
+    assert isinstance(dumped["verified_at"], datetime)
 
 
 def test_signal_input_accepts_no_company_yet():

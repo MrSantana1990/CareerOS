@@ -719,7 +719,7 @@ async def create_signal(payload: SignalInput, slug: str = Depends(require_admin)
     org_id = await organization_id(slug)
     fingerprint = signal_fingerprint(str(payload.company_id) if payload.company_id else None,
                                       payload.type, payload.source_url or "")
-    values = payload.model_dump(mode="json")
+    values = payload.model_dump()
     values.update({"organization_id": org_id, "dedup_fingerprint": fingerprint,
                    "evidence": json.dumps(payload.evidence)})
     async with SessionLocal() as session:
@@ -768,7 +768,7 @@ async def create_opportunity(payload: OpportunityInput, slug: str = Depends(requ
         str(payload.job_id) if payload.job_id else None,
         str(payload.signal_id) if payload.signal_id else None,
     )
-    values = payload.model_dump(mode="json")
+    values = payload.model_dump()
     values.update({"organization_id": org_id, "dedup_fingerprint": fingerprint,
                    "evidence": json.dumps(payload.evidence)})
     async with SessionLocal() as session:
@@ -835,7 +835,7 @@ async def create_opportunity_channel(opportunity_id: UUID, payload: OpportunityC
     if payload.type == "OFFICIAL_EMAIL" and not payload.source:
         raise HTTPException(status_code=422,
                              detail="OFFICIAL_EMAIL exige source (evidência de publicação oficial).")
-    values = payload.model_dump(mode="json")
+    values = payload.model_dump()
     values.update({"organization_id": org_id, "opportunity_id": opportunity_id,
                    "evidence": json.dumps(payload.evidence)})
     async with SessionLocal() as session:
@@ -886,7 +886,7 @@ async def create_watch(payload: WatchInput, slug: str = Depends(require_admin)) 
     org_id = await organization_id(slug)
     fingerprint = watch_fingerprint(str(payload.company_id),
                                      str(payload.opportunity_id) if payload.opportunity_id else None)
-    values = payload.model_dump(mode="json")
+    values = payload.model_dump()
     values.update({"organization_id": org_id, "dedup_fingerprint": fingerprint,
                    "evidence": json.dumps(payload.evidence)})
     async with SessionLocal() as session:
@@ -930,7 +930,7 @@ async def list_watches(due: bool = False, status: str | None = None,
 async def update_watch(watch_id: UUID, payload: WatchUpdateInput,
                         slug: str = Depends(require_admin)) -> dict[str, Any]:
     org_id = await organization_id(slug)
-    values = payload.model_dump(mode="json")
+    values = payload.model_dump()
     values.update({"organization_id": org_id, "watch_id": watch_id,
                    "evidence": json.dumps(payload.evidence) if payload.evidence is not None else None})
     async with SessionLocal() as session:
