@@ -54,6 +54,20 @@ def test_funnel_route_reuses_application_events_never_a_new_event_table():
     assert "CREATE TABLE" not in body
 
 
+def test_funnel_route_computes_historical_event_gap_never_fabricates_submitted():
+    body = _route_body(_career_source(), "get", "/analytics/funnel")
+    assert "confirmed_without_submitted_event" in body
+    assert "NOT EXISTS" in body
+    assert "INSERT INTO application_events" not in body
+
+
+def test_funnel_route_never_reports_a_misleading_global_confidence():
+    # Prompt 6.1, Secao 5: confidence e por dimensao (dentro de
+    # aggregate_by_dimension), nunca um campo global no topo da resposta.
+    body = _route_body(_career_source(), "get", "/analytics/funnel")
+    assert '"recommendation_confidence":' not in body
+
+
 def test_gaps_route_reuses_opportunity_brain_evidence():
     body = _route_body(_career_source(), "get", "/analytics/gaps")
     assert "aggregate_gap_intelligence(" in body

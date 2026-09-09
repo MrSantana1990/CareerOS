@@ -20,7 +20,7 @@ from .action_engine import (assess_language_status, build_application_plan, clas
 from .preparation import application_strategy, idempotency_key, prepare_email_draft, route_resume
 from .communications import notification_priority
 from .tracking import (aggregate_by_dimension, aggregate_gap_intelligence, calculate_conversion_funnel,
-                        classify_correlation, group_interventions_by_root_cause, recommendation_confidence)
+                        classify_correlation, group_interventions_by_root_cause)
 from .channel_discovery import discover_company_channel_candidates, discover_job_channel_candidates
 from .profile_intelligence import extract_docx_text, extract_profile_evidence
 from .market_memory import opportunity_fingerprint, signal_fingerprint, watch_fingerprint
@@ -1721,23 +1721,39 @@ async def get_conversion_funnel(slug: str = Depends(require_admin)) -> dict[str,
             GROUP BY bucket
         """), {"organization_id": org_id})).all())
         events_by_type.pop(None, None)
+        # Secao 7 (Prompt 6.1): applications CONFIRMED/alem sem nenhum
+        # application_event de envio registrado - historico incompleto
+        # real (Deutsche Bank, backfill do Prompt 2, anterior ao modelo de
+        # evento), nunca uma transicao impossivel fabricada.
+        confirmed_without_submitted_event = await session.scalar(text("""
+            SELECT count(*) FROM applications a
+            WHERE a.organization_id=:organization_id AND a.deleted_at IS NULL
+              AND a.status IN ('CONFIRMED','RECRUITER_RESPONSE','INTERVIEW','TECHNICAL_TEST','FINAL_STAGE','OFFER')
+              AND NOT EXISTS (
+                SELECT 1 FROM application_events ae
+                WHERE ae.application_id = a.id AND ae.to_status IN ('SENT','SUBMITTING','CONFIRMED')
+              )
+        """), {"organization_id": org_id})
         funnel = calculate_conversion_funnel(
             jobs_count=jobs_count or 0, scored_count=scored_count or 0,
             opportunities_by_status=opportunities_by_status, applications_by_status=applications_by_status,
             events_by_type=events_by_type,
+            confirmed_without_submitted_event=confirmed_without_submitted_event or 0,
         )
         applications_rows = [dict(row) for row in (await session.execute(text("""
             SELECT a.status, a.channel AS application_channel, o.type AS opportunity_type
             FROM applications a LEFT JOIN opportunities o ON o.id=a.opportunity_id
             WHERE a.organization_id=:organization_id AND a.deleted_at IS NULL
         """), {"organization_id": org_id})).mappings()]
+        # Secao 5/6 (Prompt 6.1): cada dimensao carrega sua PROPRIA
+        # confidence (dentro de aggregate_by_dimension) - nunca uma
+        # confidence global do tamanho TOTAL da amostra aplicada a cada
+        # cohort pequeno.
         dimensional = {
             "application_channel": aggregate_by_dimension(applications_rows, "application_channel"),
             "opportunity_type": aggregate_by_dimension(applications_rows, "opportunity_type"),
         }
-        sample_size = sum(applications_by_status.values())
-    return {"funnel": funnel, "dimensional": dimensional,
-            "recommendation_confidence": recommendation_confidence(sample_size)}
+    return {"funnel": funnel, "dimensional": dimensional}
 
 
 @router.get("/analytics/gaps")

@@ -87,6 +87,55 @@ def test_recommendation_confidence_insufficient_data_below_threshold():
     assert recommendation_confidence(5) == "INSUFFICIENT_DATA"
 
 
+# --- Prompt 6.1, Secao 5/6: per-dimension confidence (bug real corrigido) -------------------------
+
+def test_per_dimension_confidence_never_inherits_the_global_sample_size():
+    # Achado real (Prompt 6.1): 110 aplicacoes MANUAL + 1 EMAIL - o
+    # dataset GLOBAL (111) passa do limiar, mas EMAIL sozinho (n=1) nao
+    # pode herdar SUFFICIENT_DATA so por isso.
+    apps = ([{"application_channel": "MANUAL", "status": "READY"} for _ in range(110)]
+            + [{"application_channel": "EMAIL", "status": "CONFIRMED"}])
+    result = aggregate_by_dimension(apps, "application_channel")
+    assert result["EMAIL"]["sample_size"] == 1
+    assert result["EMAIL"]["confidence"] == "INSUFFICIENT_DATA"
+    assert result["MANUAL"]["sample_size"] == 110
+    assert result["MANUAL"]["confidence"] == "SUFFICIENT_DATA"
+
+
+def test_per_dimension_confidence_never_claims_a_bucket_is_best_with_tiny_sample():
+    # Secao 6: metricas descritivas apenas - confirmed_rate=100% com n=1
+    # e um FATO descritivo, nao uma recomendacao ("email converte melhor").
+    apps = [{"application_channel": "EMAIL", "status": "CONFIRMED"}]
+    result = aggregate_by_dimension(apps, "application_channel")
+    assert result["EMAIL"]["confirmed_rate"] == 100.0
+    assert result["EMAIL"]["confidence"] == "INSUFFICIENT_DATA"
+
+
+# --- Prompt 6.1, Secao 7: historical event gap, nunca um evento fabricado ---------------------------
+
+def test_historical_event_gap_is_explicit_never_a_fabricated_submitted_event():
+    # Caso real Deutsche Bank: confirmed=1, sem nenhum application_event
+    # de envio (backfill historico anterior ao modelo de evento).
+    result = calculate_conversion_funnel(
+        jobs_count=183, scored_count=180, opportunities_by_status={},
+        applications_by_status={"CONFIRMED": 1}, events_by_type={},
+        confirmed_without_submitted_event=1,
+    )
+    assert result["counts"]["submitted"] == 0
+    assert result["counts"]["confirmed"] == 1
+    assert result["gaps"]["historical_event_gap"]["count"] == 1
+    assert "explanation" in result["gaps"]["historical_event_gap"]
+
+
+def test_no_gap_reported_when_history_is_complete():
+    result = calculate_conversion_funnel(
+        jobs_count=10, scored_count=5, opportunities_by_status={},
+        applications_by_status={"CONFIRMED": 1, "SENT": 1}, events_by_type={},
+        confirmed_without_submitted_event=0,
+    )
+    assert result["gaps"] == {}
+
+
 def test_recommendation_confidence_sufficient_data_above_threshold():
     assert recommendation_confidence(25) == "SUFFICIENT_DATA"
 

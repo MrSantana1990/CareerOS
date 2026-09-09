@@ -72,45 +72,87 @@ def test_follow_up_eligible_after_minimum_days() -> None:
     assert result["days_remaining"] == 0
 
 
-# Secao 8 - assess_follow_up_eligibility (estados ricos, nunca envia)
+# Secao 8 (Prompt 6) / Secao 1-4 (Prompt 6.1) - assess_follow_up_eligibility
+# (estados ricos, nunca envia). Regressao A-G da Secao 4 do Prompt 6.1.
 
-def test_confirmed_application_is_closed_for_follow_up_purposes() -> None:
-    # Deutsche Bank real: CONFIRMED e terminal para fins de follow-up
-    # (candidatura ja confirmada, nao "aguardando envio").
+def test_a_confirmed_no_reply_before_threshold_is_not_eligible_yet() -> None:
     sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
     result = assess_follow_up_eligibility(sent_at=sent_at, application_status="CONFIRMED",
-                                           thread_state="AWAITING_RESPONSE",
-                                           now=sent_at + timedelta(days=10))
-    assert result["status"] == "CLOSED"
-
-
-def test_awaiting_response_before_minimum_days_is_not_eligible_yet() -> None:
-    sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
-    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="SENT",
                                            thread_state="AWAITING_RESPONSE",
                                            now=sent_at + timedelta(days=2))
     assert result["status"] == "NOT_ELIGIBLE_YET"
 
 
-def test_awaiting_response_after_minimum_days_is_eligible() -> None:
+def test_b_confirmed_no_reply_after_threshold_is_eligible() -> None:
     sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
-    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="SENT",
+    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="CONFIRMED",
                                            thread_state="AWAITING_RESPONSE",
                                            now=sent_at + timedelta(days=8))
     assert result["status"] == "ELIGIBLE"
 
 
-def test_thread_with_real_response_never_needs_follow_up() -> None:
+def test_c_confirmed_with_recruiter_reply_is_response_received() -> None:
     sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
-    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="SENT",
+    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="CONFIRMED",
                                            thread_state="RECRUITER_RESPONSE",
                                            now=sent_at + timedelta(days=8))
     assert result["status"] == "RESPONSE_RECEIVED"
 
 
-def test_delivery_failure_thread_blocks_follow_up() -> None:
+def test_d_rejected_application_is_terminal() -> None:
     sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
-    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="SENT",
+    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="REJECTED",
+                                           thread_state="AWAITING_RESPONSE",
+                                           now=sent_at + timedelta(days=10))
+    assert result["status"] == "TERMINAL"
+
+
+def test_e_offer_is_terminal_never_eligible_for_follow_up() -> None:
+    sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
+    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="OFFER",
+                                           thread_state="AWAITING_RESPONSE",
+                                           now=sent_at + timedelta(days=10))
+    assert result["status"] == "TERMINAL"
+
+
+def test_e_hired_and_withdrawn_are_terminal_if_they_ever_appear() -> None:
+    sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
+    for status in ("HIRED", "WITHDRAWN"):
+        result = assess_follow_up_eligibility(sent_at=sent_at, application_status=status,
+                                               now=sent_at + timedelta(days=10))
+        assert result["status"] == "TERMINAL"
+
+
+def test_f_auto_reply_never_counts_as_recruiter_response() -> None:
+    # Secao 4.F: AUTO_REPLY cai no mesmo caminho de AWAITING_RESPONSE -
+    # decidido so pelo prazo, nunca vira RESPONSE_RECEIVED.
+    sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
+    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="CONFIRMED",
+                                           thread_state="AUTO_REPLY",
+                                           now=sent_at + timedelta(days=2))
+    assert result["status"] == "NOT_ELIGIBLE_YET"
+    result_after = assess_follow_up_eligibility(sent_at=sent_at, application_status="CONFIRMED",
+                                                 thread_state="AUTO_REPLY",
+                                                 now=sent_at + timedelta(days=8))
+    assert result_after["status"] == "ELIGIBLE"
+
+
+def test_g_bounce_never_counts_as_recruiter_response_blocks_instead() -> None:
+    sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
+    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="CONFIRMED",
                                            thread_state="DELIVERY_FAILURE",
                                            now=sent_at + timedelta(days=8))
     assert result["status"] == "BLOCKED"
+
+
+def test_not_yet_sent_application_is_not_applicable() -> None:
+    result = assess_follow_up_eligibility(sent_at=None, application_status="PREPARING")
+    assert result["status"] == "NOT_APPLICABLE"
+
+
+def test_application_status_already_recruiter_response_short_circuits_thread_check() -> None:
+    # O proprio status da candidatura ja e evidencia mais forte que uma
+    # nova checagem de thread - nao precisa do thread_state confirmar de novo.
+    sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
+    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="INTERVIEW", thread_state=None)
+    assert result["status"] == "RESPONSE_RECEIVED"

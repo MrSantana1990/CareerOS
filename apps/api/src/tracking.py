@@ -48,7 +48,15 @@ def _rate(numerator: int, denominator: int) -> float | None:
 
 
 def calculate_conversion_funnel(*, jobs_count: int, scored_count: int, opportunities_by_status: dict[str, int],
-                                 applications_by_status: dict[str, int], events_by_type: dict[str, int]) -> dict:
+                                 applications_by_status: dict[str, int], events_by_type: dict[str, int],
+                                 confirmed_without_submitted_event: int = 0) -> dict:
+    """confirmed_without_submitted_event (Secao 7, Prompt 6.1): quantas
+    applications CONFIRMED (ou alem) nao tem nenhum application_event real
+    registrando a transicao de envio - caso real do Deutsche Bank (Cycle
+    009/Prompt 2: status setado direto via backfill historico, antes do
+    modelo de evento existir). Nunca fabrica um evento SUBMITTED ou
+    timestamp falso para 'consertar' a aparencia do funil - so torna a
+    lacuna EXPLICITA."""
     actionable = (opportunities_by_status.get("ACTIONABLE", 0) + opportunities_by_status.get("PREPARED", 0))
     prepared = applications_by_status.get("PREPARING", 0) + applications_by_status.get("READY", 0)
     submitted = applications_by_status.get("SENT", 0) + applications_by_status.get("SUBMITTING", 0)
@@ -69,7 +77,15 @@ def calculate_conversion_funnel(*, jobs_count: int, scored_count: int, opportuni
         "offer_rate": _rate(offers, interviews),
         "hire_rate": _rate(hires, offers),
     }
-    return {"counts": counts, "rates": rates}
+    gaps = {}
+    if confirmed_without_submitted_event:
+        gaps["historical_event_gap"] = {
+            "count": confirmed_without_submitted_event,
+            "explanation": ("Application(s) confirmed/beyond sem application_event de envio "
+                            "registrado - historico anterior ao modelo de evento atual, nao um "
+                            "erro de transicao impossivel."),
+        }
+    return {"counts": counts, "rates": rates, "gaps": gaps}
 
 
 # ---------------------------------------------------------------------------
@@ -77,14 +93,25 @@ def calculate_conversion_funnel(*, jobs_count: int, scored_count: int, opportuni
 # ---------------------------------------------------------------------------
 
 def aggregate_by_dimension(applications: list[dict], dimension: str) -> dict:
-    """Dimensao ausente fica UNKNOWN, nunca descartada/inventada."""
-    buckets: dict[str, dict[str, int]] = {}
+    """Dimensao ausente fica UNKNOWN, nunca descartada/inventada.
+
+    Achado real (Prompt 6.1, Secao 5): cada bucket precisa da sua PROPRIA
+    confidence, nunca a confidence do tamanho da amostra GLOBAL. Um
+    dataset com 111 applications no total mas so 1 no canal EMAIL nao
+    pode herdar SUFFICIENT_DATA so porque o total geral passa do limiar -
+    cada dimensao/cohort e avaliada isoladamente (Secao 6: nenhuma
+    recomendacao prematura tipo 'email converte melhor' com n=1)."""
+    buckets: dict[str, dict] = {}
     for item in applications:
         key = str(item.get(dimension) or "UNKNOWN")
         bucket = buckets.setdefault(key, {"total": 0, "confirmed": 0})
         bucket["total"] += 1
         if item.get("status") == "CONFIRMED":
             bucket["confirmed"] += 1
+    for bucket in buckets.values():
+        bucket["sample_size"] = bucket["total"]
+        bucket["confirmed_rate"] = _rate(bucket["confirmed"], bucket["total"])
+        bucket["confidence"] = recommendation_confidence(bucket["total"])
     return buckets
 
 
