@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from src.reply_tracking import classify_application_thread_reply, follow_up_status
+from src.reply_tracking import assess_follow_up_eligibility, classify_application_thread_reply, follow_up_status
 
 
 def test_auto_submitted_header_is_never_a_recruiter_response() -> None:
@@ -70,3 +70,47 @@ def test_follow_up_eligible_after_minimum_days() -> None:
     result = follow_up_status(sent_at, now)
     assert result["eligible"] is True
     assert result["days_remaining"] == 0
+
+
+# Secao 8 - assess_follow_up_eligibility (estados ricos, nunca envia)
+
+def test_confirmed_application_is_closed_for_follow_up_purposes() -> None:
+    # Deutsche Bank real: CONFIRMED e terminal para fins de follow-up
+    # (candidatura ja confirmada, nao "aguardando envio").
+    sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
+    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="CONFIRMED",
+                                           thread_state="AWAITING_RESPONSE",
+                                           now=sent_at + timedelta(days=10))
+    assert result["status"] == "CLOSED"
+
+
+def test_awaiting_response_before_minimum_days_is_not_eligible_yet() -> None:
+    sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
+    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="SENT",
+                                           thread_state="AWAITING_RESPONSE",
+                                           now=sent_at + timedelta(days=2))
+    assert result["status"] == "NOT_ELIGIBLE_YET"
+
+
+def test_awaiting_response_after_minimum_days_is_eligible() -> None:
+    sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
+    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="SENT",
+                                           thread_state="AWAITING_RESPONSE",
+                                           now=sent_at + timedelta(days=8))
+    assert result["status"] == "ELIGIBLE"
+
+
+def test_thread_with_real_response_never_needs_follow_up() -> None:
+    sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
+    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="SENT",
+                                           thread_state="RECRUITER_RESPONSE",
+                                           now=sent_at + timedelta(days=8))
+    assert result["status"] == "RESPONSE_RECEIVED"
+
+
+def test_delivery_failure_thread_blocks_follow_up() -> None:
+    sent_at = datetime(2026, 9, 6, 8, 58, 46, tzinfo=UTC)
+    result = assess_follow_up_eligibility(sent_at=sent_at, application_status="SENT",
+                                           thread_state="DELIVERY_FAILURE",
+                                           now=sent_at + timedelta(days=8))
+    assert result["status"] == "BLOCKED"

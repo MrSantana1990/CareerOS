@@ -76,6 +76,9 @@ def classify_application_thread_reply(sender: str, subject: str, body: str,
 
 FOLLOW_UP_MINIMUM_DAYS = 7
 
+FOLLOW_UP_STATES = ("NOT_ELIGIBLE_YET", "ELIGIBLE", "RESPONSE_RECEIVED", "CLOSED", "BLOCKED")
+_TERMINAL_APPLICATION_STATUSES = {"REJECTED", "CLOSED", "WITHDRAWN", "OFFER", "HIRED", "CONFIRMED"}
+
 
 def follow_up_status(sent_at: datetime, now: datetime | None = None) -> dict:
     """Cycle 010: nenhum mecanismo de follow-up existia (a migration
@@ -89,3 +92,21 @@ def follow_up_status(sent_at: datetime, now: datetime | None = None) -> dict:
         return {"eligible": True, "eligible_at": eligible_at.isoformat(), "days_remaining": 0}
     remaining = (eligible_at - now).days + (1 if (eligible_at - now).seconds else 0)
     return {"eligible": False, "eligible_at": eligible_at.isoformat(), "days_remaining": max(remaining, 0)}
+
+
+def assess_follow_up_eligibility(*, sent_at: datetime, application_status: str,
+                                  thread_state: str | None = None, now: datetime | None = None) -> dict:
+    """Fase 2, Prompt 6, Secao 8 - reveste follow_up_status com o estado
+    real da candidatura/thread (nunca so a contagem de dias). Nenhum envio
+    acontece aqui - so classificacao, igual ao follow_up_status original."""
+    if application_status in _TERMINAL_APPLICATION_STATUSES:
+        return {"status": "CLOSED", "reason": f"application_status:{application_status}"}
+    if thread_state and thread_state not in {"AWAITING_RESPONSE", None}:
+        if thread_state == "DELIVERY_FAILURE":
+            return {"status": "BLOCKED", "reason": "delivery_failure_email_undeliverable"}
+        return {"status": "RESPONSE_RECEIVED", "reason": f"thread_state:{thread_state}"}
+    day_status = follow_up_status(sent_at, now)
+    if day_status["eligible"]:
+        return {"status": "ELIGIBLE", "eligible_at": day_status["eligible_at"], "days_remaining": 0}
+    return {"status": "NOT_ELIGIBLE_YET", "eligible_at": day_status["eligible_at"],
+            "days_remaining": day_status["days_remaining"]}

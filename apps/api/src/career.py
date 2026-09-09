@@ -18,7 +18,11 @@ from .action_engine import (assess_language_status, build_application_plan, clas
                              classify_profile_completeness, evaluate_action_policy,
                              is_profile_completeness_sufficient, select_channel)
 from .preparation import application_strategy, idempotency_key, prepare_email_draft, route_resume
-from .communications import correlate_message, notification_priority
+from .communications import notification_priority
+from .tracking import (aggregate_by_dimension, aggregate_gap_intelligence, calculate_conversion_funnel,
+                        classify_correlation, group_interventions_by_root_cause, recommendation_confidence)
+from .channel_discovery import discover_company_channel_candidates, discover_job_channel_candidates
+from .profile_intelligence import extract_docx_text, extract_profile_evidence
 from .market_memory import opportunity_fingerprint, signal_fingerprint, watch_fingerprint
 from .opportunity_brain import (BRAIN_VERSION, BrainDecision, evaluate_job_opportunity,
                                  evaluate_signal_opportunity, evaluate_watch_recheck,
@@ -1589,6 +1593,217 @@ async def download_resume_file(version_id: UUID, slug: str = Depends(require_adm
                      headers={"X-Resume-Filename": filename})
 
 
+@router.post("/profile/extract-evidence")
+async def extract_profile_evidence_route(slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Profile Intelligence (Fase 2, Prompt 6, Secoes 15-19) - extrai fatos
+    EXPLICITOS do curriculo aprovado e persistido (nunca infere, nunca usa
+    memoria de conversa). So DOCX e suportado nesta entrega (stdlib puro,
+    sem nova dependencia) - resumes em PDF sao pulados e reportados como
+    gap, nunca silenciosamente ignorados."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        resumes = [dict(row) for row in (await session.execute(text("""
+            SELECT rv.id, rv.storage_key, rv.sha256, r.code
+            FROM resume_versions rv JOIN resumes r ON r.id=rv.resume_id
+            WHERE rv.organization_id=:organization_id AND r.deleted_at IS NULL
+              AND rv.approved_at IS NOT NULL AND r.active=true
+        """), {"organization_id": org_id})).mappings()]
+        skill_rows = [dict(row) for row in (await session.execute(text(
+            "SELECT id, name FROM skills WHERE organization_id=:organization_id AND deleted_at IS NULL"
+        ), {"organization_id": org_id})).mappings()]
+
+        processed, skipped_pdf, evidence_by_resume = [], [], {}
+        for resume in resumes:
+            storage_path = Path(resume["storage_key"])
+            if storage_path.suffix.lower() != ".docx":
+                skipped_pdf.append({"resume_code": resume["code"], "reason": "unsupported_format",
+                                     "extension": storage_path.suffix})
+                continue
+            if not storage_path.exists():
+                continue
+            text_content = extract_docx_text(storage_path.read_bytes())
+            evidence = extract_profile_evidence(text_content, [item["name"] for item in skill_rows])
+            evidence_by_resume[resume["code"]] = {**evidence, "resume_version_id": str(resume["id"]),
+                                                    "resume_sha256": resume["sha256"]}
+            processed.append(resume["code"])
+
+        if not evidence_by_resume:
+            return {"processed": [], "skipped": skipped_pdf, "language_populated": False,
+                    "skill_evidence_created": 0}
+
+        merged_language_levels = {}
+        merged_skill_mentions: list[dict] = []
+        for evidence in evidence_by_resume.values():
+            merged_language_levels.update(evidence.get("language_levels") or {})
+            merged_skill_mentions.extend(evidence.get("skill_mentions") or [])
+
+        await session.execute(text("""
+            UPDATE candidate_profiles SET resume_evidence=CAST(:evidence AS jsonb), updated_at=now()
+            WHERE organization_id=:organization_id
+        """), {"organization_id": org_id, "evidence": json.dumps(evidence_by_resume)})
+
+        current_language_levels = await session.scalar(text(
+            "SELECT language_levels FROM candidate_profiles WHERE organization_id=:organization_id LIMIT 1"
+        ), {"organization_id": org_id})
+        language_populated = False
+        if not current_language_levels and merged_language_levels:
+            flat_levels = {language: fact["value"] for language, fact in merged_language_levels.items()}
+            await session.execute(text("""
+                UPDATE candidate_profiles SET language_levels=CAST(:levels AS jsonb), updated_at=now()
+                WHERE organization_id=:organization_id
+            """), {"organization_id": org_id, "levels": json.dumps(flat_levels)})
+            language_populated = True
+            await session.execute(text("""
+                UPDATE human_interventions SET status='RESOLVED', resolution='RESOLVED', resolved_at=now(),
+                  updated_at=now()
+                WHERE organization_id=:organization_id AND status='PENDING'
+                  AND evidence->>'deduplication_key'='profile:language_declaration'
+            """), {"organization_id": org_id})
+
+        skill_evidence_created = 0
+        name_to_id = {item["name"]: item["id"] for item in skill_rows}
+        for mention in merged_skill_mentions:
+            skill_id = name_to_id.get(mention["skill_name"])
+            if not skill_id:
+                continue
+            resume_code = next((code for code, ev in evidence_by_resume.items()
+                                if mention in (ev.get("skill_mentions") or [])), "GENERAL")
+            source_tag = f"resume_version:{evidence_by_resume[resume_code]['resume_version_id']}"
+            exists = await session.scalar(text("""
+                SELECT 1 FROM skill_evidence WHERE organization_id=:organization_id AND skill_id=:skill_id
+                  AND source=:source AND deleted_at IS NULL LIMIT 1
+            """), {"organization_id": org_id, "skill_id": skill_id, "source": source_tag})
+            if exists:
+                continue
+            await session.execute(text("""
+                INSERT INTO skill_evidence (id, organization_id, skill_id, evidence_type, title,
+                  description, source, approved)
+                VALUES (gen_random_uuid(), :organization_id, :skill_id, 'RESUME', :title,
+                  :description, :source, false)
+            """), {"organization_id": org_id, "skill_id": skill_id,
+                    "title": f"Mencionado no currículo aprovado ({resume_code})",
+                    "description": mention["evidence_snippet"], "source": source_tag})
+            skill_evidence_created += 1
+        await session.commit()
+    return {"processed": processed, "skipped": skipped_pdf, "language_populated": language_populated,
+            "skill_evidence_created": skill_evidence_created}
+
+
+@router.get("/analytics/funnel")
+async def get_conversion_funnel(slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Secao 10/11 - reusa jobs/job_scores/opportunities/applications/
+    application_events ja existentes (nunca duplica o modelo de evento -
+    application_events ja e append-only, com trigger de banco)."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        jobs_count = await session.scalar(text(
+            "SELECT count(*) FROM jobs WHERE organization_id=:organization_id AND deleted_at IS NULL"
+        ), {"organization_id": org_id})
+        scored_count = await session.scalar(text(
+            "SELECT count(DISTINCT job_id) FROM job_scores WHERE organization_id=:organization_id"
+        ), {"organization_id": org_id})
+        opportunities_by_status = dict((await session.execute(text(
+            "SELECT status, count(*) FROM opportunities WHERE organization_id=:organization_id GROUP BY status"
+        ), {"organization_id": org_id})).all())
+        applications_by_status = dict((await session.execute(text(
+            "SELECT status, count(*) FROM applications WHERE organization_id=:organization_id "
+            "AND deleted_at IS NULL GROUP BY status"
+        ), {"organization_id": org_id})).all())
+        events_by_type = dict((await session.execute(text("""
+            SELECT CASE
+                     WHEN to_status IN ('RECRUITER_RESPONSE') THEN 'RESPONSE'
+                     WHEN to_status IN ('INTERVIEW','TECHNICAL_TEST','FINAL_STAGE') THEN 'INTERVIEW'
+                     WHEN to_status = 'OFFER' THEN 'OFFER'
+                     ELSE NULL
+                   END AS bucket, count(*)
+            FROM application_events ae JOIN applications a ON a.id=ae.application_id
+            WHERE a.organization_id=:organization_id
+            GROUP BY bucket
+        """), {"organization_id": org_id})).all())
+        events_by_type.pop(None, None)
+        funnel = calculate_conversion_funnel(
+            jobs_count=jobs_count or 0, scored_count=scored_count or 0,
+            opportunities_by_status=opportunities_by_status, applications_by_status=applications_by_status,
+            events_by_type=events_by_type,
+        )
+        applications_rows = [dict(row) for row in (await session.execute(text("""
+            SELECT a.status, a.channel AS application_channel, o.type AS opportunity_type
+            FROM applications a LEFT JOIN opportunities o ON o.id=a.opportunity_id
+            WHERE a.organization_id=:organization_id AND a.deleted_at IS NULL
+        """), {"organization_id": org_id})).mappings()]
+        dimensional = {
+            "application_channel": aggregate_by_dimension(applications_rows, "application_channel"),
+            "opportunity_type": aggregate_by_dimension(applications_rows, "opportunity_type"),
+        }
+        sample_size = sum(applications_by_status.values())
+    return {"funnel": funnel, "dimensional": dimensional,
+            "recommendation_confidence": recommendation_confidence(sample_size)}
+
+
+@router.get("/analytics/gaps")
+async def get_gap_intelligence(slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Career Gap Intelligence (Secao 14) - agrega hard_blocks/unknowns
+    reais ja persistidos pelo Opportunity Brain (Prompt 4), nunca inventa
+    uma categoria sem origem real."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        opportunities = [dict(row) for row in (await session.execute(text(
+            "SELECT id, fit_score, evidence FROM opportunities WHERE organization_id=:organization_id"
+        ), {"organization_id": org_id})).mappings()]
+    return {"gaps": aggregate_gap_intelligence(opportunities), "opportunities_considered": len(opportunities)}
+
+
+@router.post("/opportunities/{opportunity_id}/channels/discover")
+async def discover_channels(opportunity_id: UUID, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Channel Population (Fase 2, Prompt 6, Secao 20 - P0). So cria
+    OpportunityChannel a partir de evidencia real ja persistida (Job/
+    Company/structured_extraction) - nunca adivinha e-mail, nunca
+    transforma homepage generica em canal (Secao 21). Nenhuma acao de
+    candidatura acontece aqui."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        opportunity = (await session.execute(text(
+            "SELECT * FROM opportunities WHERE id=:id AND organization_id=:organization_id"
+        ), {"id": opportunity_id, "organization_id": org_id})).mappings().first()
+        if not opportunity:
+            raise HTTPException(status_code=404, detail="Opportunity não encontrada.")
+        company = dict((await session.execute(text(
+            "SELECT careers_url, official_recruiting_email, talent_pool_url, ats_type "
+            "FROM companies WHERE id=:id"
+        ), {"id": opportunity["company_id"]})).mappings().first() or {})
+
+        job = None
+        if opportunity["job_id"]:
+            job = (await session.execute(text(
+                "SELECT * FROM jobs WHERE id=:id AND organization_id=:organization_id"
+            ), {"id": opportunity["job_id"], "organization_id": org_id})).mappings().first()
+
+        if job:
+            candidates = discover_job_channel_candidates(
+                dict(job), company,
+                dict(job["structured_extraction"]) if job["structured_extraction"] else None,
+            )
+        else:
+            candidates = discover_company_channel_candidates(company)
+
+        created = []
+        for candidate in candidates:
+            row = (await session.execute(text("""
+                INSERT INTO opportunity_channels (id, organization_id, opportunity_id, type, url_or_email,
+                  source, confidence, requires_auth, requires_captcha, requires_human, status, evidence)
+                VALUES (gen_random_uuid(), :organization_id, :opportunity_id, :type, :url_or_email,
+                  :source, :confidence, :requires_auth, :requires_captcha, :requires_human, :status,
+                  CAST(:evidence AS jsonb))
+                ON CONFLICT (opportunity_id, type, url_or_email) DO UPDATE SET
+                  confidence=EXCLUDED.confidence, evidence=EXCLUDED.evidence, updated_at=now()
+                RETURNING id, (xmax = 0) AS created
+            """), {"organization_id": org_id, "opportunity_id": opportunity_id,
+                    "evidence": json.dumps({"discovery": "channel_population_v1"}), **candidate})).mappings().one()
+            created.append({**candidate, "id": row["id"], "created": row["created"]})
+        await session.commit()
+    return {"opportunity_id": opportunity_id, "candidates": created}
+
+
 @router.get("/career-rules")
 async def list_rules(slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
     org_id = await organization_id(slug)
@@ -1844,18 +2059,27 @@ async def sync_communications(batch: CommunicationBatch, slug: str = Depends(req
     org_id = await organization_id(slug)
     matched = unmatched = notifications = 0
     async with SessionLocal() as session:
+        # Achado real (Prompt 6): o INNER JOIN em jobs excluia toda
+        # candidatura ligada so a uma Opportunity (SPONTANEOUS_APPLICATION
+        # sem Job - ex.: Deutsche Bank, Prompt 2) do pool de correlacao.
+        # LEFT JOIN duplo (via Job OU via Opportunity) inclui os dois casos.
         rows = (await session.execute(text("""
-            SELECT a.id, j.title, c.name AS company, c.domain AS company_domain
-            FROM applications a JOIN jobs j ON j.id=a.job_id
-            LEFT JOIN companies c ON c.id=j.company_id
+            SELECT a.id, COALESCE(j.title, '') AS title,
+                   COALESCE(cj.name, co.name) AS company,
+                   COALESCE(cj.domain, co.domain) AS company_domain
+            FROM applications a
+            LEFT JOIN jobs j ON j.id=a.job_id
+            LEFT JOIN companies cj ON cj.id=j.company_id
+            LEFT JOIN opportunities o ON o.id=a.opportunity_id
+            LEFT JOIN companies co ON co.id=o.company_id
             WHERE a.organization_id=:organization_id AND a.deleted_at IS NULL
               AND a.status NOT IN ('CLOSED', 'WITHDRAWN')
         """), {"organization_id": org_id})).mappings()
         candidates = [dict(item) for item in rows]
         for item_model in batch.items:
             item = item_model.model_dump()
-            application_id, evidence = correlate_message(item, candidates)
-            correlation_status = "MATCHED" if application_id else "REVIEW" if evidence == ["ambiguous"] else "UNMATCHED"
+            correlation = classify_correlation(item, candidates)
+            application_id, correlation_status = correlation["application_id"], correlation["status"]
             matched += int(bool(application_id))
             unmatched += int(not application_id)
             await session.execute(text("""
@@ -1873,7 +2097,7 @@ async def sync_communications(batch: CommunicationBatch, slug: str = Depends(req
                   evidence=EXCLUDED.evidence, updated_at=now()
             """), {**item, "organization_id": org_id, "application_id": application_id,
                     "provider": batch.provider, "correlation_status": correlation_status,
-                    "evidence": json.dumps({"signals": evidence})})
+                    "evidence": json.dumps({"signals": correlation["evidence"]})})
             if item["category"] != "OTHER":
                 result = await session.execute(text("""
                     INSERT INTO career_notifications
@@ -2137,13 +2361,31 @@ async def list_interventions(status: str = Query(default="PENDING"),
     org_id = await organization_id(slug)
     async with SessionLocal() as session:
         rows = (await session.execute(text("""
-            SELECT id, application_id, executor_id, reason, status, title,
+            SELECT id, application_id, opportunity_id, executor_id, reason, status, title,
                    instructions, page_url, evidence, created_at, resolved_at, resolution
             FROM human_interventions
             WHERE organization_id=:organization_id AND (:status='ALL' OR status=:status)
             ORDER BY CASE status WHEN 'PENDING' THEN 1 ELSE 2 END, created_at DESC LIMIT 100
         """), {"organization_id": org_id, "status": status})).mappings()
     return [dict(row) for row in rows]
+
+
+@router.get("/interventions/grouped")
+async def list_interventions_grouped(status: str = Query(default="PENDING"),
+                                     slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    """Secao 25 - agrupa por causa raiz (mesmo reason + mesmos
+    human_requirements) para o usuario nao virar operador: 10
+    Opportunities bloqueadas pelo mesmo motivo viram 1 grupo, nunca 10
+    decisoes identicas. Nenhum historico e apagado - so a apresentacao
+    agrupa (ver /interventions para a lista individual completa)."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        rows = [dict(row) for row in (await session.execute(text("""
+            SELECT id, opportunity_id, reason, evidence
+            FROM human_interventions
+            WHERE organization_id=:organization_id AND (:status='ALL' OR status=:status)
+        """), {"organization_id": org_id, "status": status})).mappings()]
+    return group_interventions_by_root_cause(rows)
 
 
 @router.post("/interventions/{intervention_id}/resolve")
