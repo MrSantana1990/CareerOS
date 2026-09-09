@@ -13,6 +13,32 @@ Pure, sem I/O - recebe dicts ja carregados pelo caller (career.py).
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit, urlunsplit
+
+_URL_OR_EMAIL_MAX_LENGTH = 500  # opportunity_channels.url_or_email e VARCHAR(500)
+
+
+def _canonicalize_url(url: str | None) -> str | None:
+    """Achado real na validacao do Prompt 6: URLs do LinkedIn carregam
+    parametros de tracking (eBP/refId/trackingId/trk) que sozinhos ja
+    passam de 500 caracteres - StringDataRightTruncationError real em
+    producao. A query string e ruido analitico do LinkedIn, nao faz parte
+    do endereco real da vaga (linkedin.com/jobs/view/{id}/ sozinho ja
+    carrega para a mesma pagina) - remover a query string e uma
+    canonicalizacao correta, nunca uma truncagem cega que corromperia a
+    URL no meio."""
+    if not url:
+        return url
+    if len(url) <= _URL_OR_EMAIL_MAX_LENGTH:
+        return url
+    parts = urlsplit(url)
+    without_query = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    if len(without_query) <= _URL_OR_EMAIL_MAX_LENGTH:
+        return without_query
+    # Ultimo recurso, nunca esperado na pratica: path em si excede o limite.
+    return without_query[:_URL_OR_EMAIL_MAX_LENGTH]
+
+
 _ATS_SOURCES = {"greenhouse", "lever", "ashby"}
 # Plataformas com padrao real ja documentado (Prompt 5, Secoes 31/32):
 # LinkedIn exige login + reCAPTCHA; InfoJobs exige login. Nunca contornado.
@@ -49,13 +75,14 @@ def discover_job_channel_candidates(job: dict, company: dict, structured_extract
     source_lower = str(job.get("source") or "").strip().lower()
     channel_lower = str(job.get("application_channel") or "").strip().lower()
     if source_lower in _ATS_SOURCES or channel_lower in _ATS_SOURCES:
-        candidates.append({"type": "OFFICIAL_ATS", "url_or_email": job.get("canonical_url") or job.get("source_url"),
+        candidates.append({"type": "OFFICIAL_ATS",
+                            "url_or_email": _canonicalize_url(job.get("canonical_url") or job.get("source_url")),
                             "source": job.get("source"), "confidence": 95, "requires_auth": False,
                             "requires_captcha": False, "requires_human": False, "status": "CANDIDATE"})
 
     # 3. rota oficial de carreiras da Company (nivel de empresa, nao da vaga).
     if company.get("careers_url"):
-        candidates.append({"type": "OFFICIAL_CAREERS", "url_or_email": company["careers_url"],
+        candidates.append({"type": "OFFICIAL_CAREERS", "url_or_email": _canonicalize_url(company["careers_url"]),
                             "source": "company_intelligence", "confidence": 80, "requires_auth": False,
                             "requires_captcha": False, "requires_human": True, "status": "CANDIDATE"})
 
@@ -66,7 +93,7 @@ def discover_job_channel_candidates(job: dict, company: dict, structured_extract
 
     # 5. talent pool oficial da Company.
     if company.get("talent_pool_url"):
-        candidates.append({"type": "TALENT_POOL", "url_or_email": company["talent_pool_url"],
+        candidates.append({"type": "TALENT_POOL", "url_or_email": _canonicalize_url(company["talent_pool_url"]),
                             "source": "company_intelligence", "confidence": 70, "requires_auth": False,
                             "requires_captcha": False, "requires_human": True, "status": "CANDIDATE"})
 
@@ -75,7 +102,7 @@ def discover_job_channel_candidates(job: dict, company: dict, structured_extract
     # documentados por plataforma (Secao 22 - fallback, nao invencao).
     if job.get("canonical_url") and not candidates:
         candidates.append({
-            "type": "ASSISTED", "url_or_email": job["canonical_url"], "source": job.get("source"),
+            "type": "ASSISTED", "url_or_email": _canonicalize_url(job["canonical_url"]), "source": job.get("source"),
             "confidence": 60, "requires_auth": source_lower in _KNOWN_AUTH_SOURCES,
             "requires_captcha": source_lower in _KNOWN_CAPTCHA_SOURCES,
             "requires_human": True, "status": "CANDIDATE",
@@ -89,11 +116,11 @@ def discover_company_channel_candidates(company: dict) -> list[dict]:
     (careers/talent pool/e-mail), a Opportunity permanece sem canal (WATCH)."""
     candidates: list[dict] = []
     if company.get("careers_url"):
-        candidates.append({"type": "OFFICIAL_CAREERS", "url_or_email": company["careers_url"],
+        candidates.append({"type": "OFFICIAL_CAREERS", "url_or_email": _canonicalize_url(company["careers_url"]),
                             "source": "company_intelligence", "confidence": 80, "requires_auth": False,
                             "requires_captcha": False, "requires_human": True, "status": "CANDIDATE"})
     if company.get("talent_pool_url"):
-        candidates.append({"type": "TALENT_POOL", "url_or_email": company["talent_pool_url"],
+        candidates.append({"type": "TALENT_POOL", "url_or_email": _canonicalize_url(company["talent_pool_url"]),
                             "source": "company_intelligence", "confidence": 70, "requires_auth": False,
                             "requires_captcha": False, "requires_human": True, "status": "CANDIDATE"})
     if company.get("official_recruiting_email"):

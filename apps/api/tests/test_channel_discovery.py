@@ -68,6 +68,28 @@ def test_linkedin_job_without_other_evidence_falls_back_to_assisted_with_known_a
     assert candidates[0]["requires_captcha"] is True
 
 
+def test_linkedin_tracking_params_stripped_to_fit_url_or_email_column():
+    # Achado real na validacao do Prompt 6: uma URL real do LinkedIn com
+    # parametros de tracking (eBP/refId/trackingId/trk) passou de 900
+    # caracteres e quebrou o INSERT (opportunity_channels.url_or_email e
+    # VARCHAR(500)) com StringDataRightTruncationError. A query string e
+    # ruido analitico, nao faz parte do endereco real da vaga - remover
+    # (nunca truncar cego no meio da URL) e a correcao certa.
+    long_url = ("https://www.linkedin.com/jobs/view/4362345837/?eBP=" + "x" * 400
+                + "&refId=abc&trackingId=def&trk=flagship3_search_srp_jobs")
+    assert len(long_url) > 500
+    job = {"canonical_url": long_url, "source": "LinkedIn"}
+    candidates = discover_job_channel_candidates(job, COMPANY_EMPTY)
+    assert len(candidates[0]["url_or_email"]) <= 500
+    assert candidates[0]["url_or_email"] == "https://www.linkedin.com/jobs/view/4362345837/"
+
+
+def test_short_url_is_never_altered():
+    job = {"canonical_url": "https://www.linkedin.com/jobs/view/123", "source": "LinkedIn"}
+    candidates = discover_job_channel_candidates(job, COMPANY_EMPTY)
+    assert candidates[0]["url_or_email"] == "https://www.linkedin.com/jobs/view/123"
+
+
 def test_infojobs_job_without_other_evidence_falls_back_to_assisted_with_auth_only():
     job = {"canonical_url": "https://www.infojobs.com.br/vaga/123.aspx", "source": "InfoJobs"}
     candidates = discover_job_channel_candidates(job, COMPANY_EMPTY)
