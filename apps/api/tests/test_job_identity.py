@@ -290,6 +290,15 @@ def test_pending_evaluation_filter_excludes_duplicate_jobs():
     assert "j.dedup_status != 'DUPLICATE'" in body
 
 
+def test_list_jobs_response_always_includes_dedup_status():
+    # Achado real de producao (Prompt 12): sem isto na SELECT, qualquer
+    # caller que filtre client-side por job.get("dedup_status") (ex.:
+    # job_correlation_cycle no automation-host) silenciosamente processa
+    # duplicatas tambem - o campo simplesmente nao existia na resposta.
+    body = _route_body_get(_career_source(), "/jobs")
+    assert "j.dedup_status," in body
+
+
 def _route_body_get(source: str, path: str) -> str:
     start = source.index(f'@router.get("{path}")')
     end = source.index("\n@router.", start + 1)
