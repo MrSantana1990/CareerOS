@@ -711,6 +711,7 @@ async def reconcile_duplicate_jobs(dry_run: bool = True, slug: str = Depends(req
         """), {"organization_id": org_id})).mappings()]
         jobs = [{**row, "id": str(row["id"]), "company_id": str(row["company_id"]) if row["company_id"] else None}
                 for row in rows]
+        jobs_by_id = {job["id"]: job for job in jobs}
 
         grouping = group_duplicate_jobs(jobs)
         applied: list[dict] = []
@@ -730,6 +731,27 @@ async def reconcile_duplicate_jobs(dry_run: bool = True, slug: str = Depends(req
                 continue
 
             if not dry_run:
+                # Secao 11 (Ingest Idempotency): marcar as duplicatas nao
+                # basta - se o Job canonico ainda guarda o fingerprint
+                # ANTIGO (por conteudo, calculado antes desta correcao),
+                # uma nova raspagem futura da MESMA vaga real (com um
+                # tracking param diferente) computaria o novo fingerprint
+                # por provider_id e NAO bateria com o valor antigo
+                # persistido, criando um 8o Job em vez de reconhecer o
+                # canonico. Realinhar o fingerprint do canonico para o
+                # metodo novo fecha esse gap para o futuro.
+                canonical_job = jobs_by_id[group["canonical_job_id"]]
+                new_fingerprint, method, _ = canonical_job_fingerprint(
+                    company="", title="", location="", description="",
+                    source=canonical_job.get("source"), source_url=canonical_job.get("source_url"),
+                    canonical_url=canonical_job.get("canonical_url"),
+                )
+                if method == "PROVIDER_ID":
+                    await session.execute(text("""
+                        UPDATE jobs SET fingerprint=:fingerprint, updated_at=now()
+                        WHERE id=:canonical_job_id AND organization_id=:organization_id
+                    """), {"fingerprint": new_fingerprint, "canonical_job_id": group["canonical_job_id"],
+                           "organization_id": org_id})
                 canonical_opportunity_id = await session.scalar(text(
                     "SELECT id FROM opportunities WHERE job_id=:job_id AND organization_id=:organization_id"
                 ), {"job_id": group["canonical_job_id"], "organization_id": org_id})
