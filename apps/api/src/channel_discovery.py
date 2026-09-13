@@ -65,8 +65,15 @@ def discover_job_channel_candidates(job: dict, company: dict, structured_extract
     application_field = extraction.get("application_instructions") or {}
     explicit_email = (application_field.get("value") or {}).get("recruiting_email")
     if explicit_email:
+        # Prompt 9: evidence_snippet/extraction_method precisam viajar junto
+        # com o candidato - sem isso, channel_verification.classify_email_trust
+        # (Secao 9) nao tem como distinguir esta instrucao explicita de um
+        # e-mail generico sem prova (achado real na validacao em producao
+        # deste prompt: o candidato chegava sem evidence nenhuma).
         candidates.append({**_email_channel(explicit_email, application_field.get("source_url") or job.get("canonical_url"), 90),
-                            "requires_human": False})
+                            "requires_human": False,
+                            "evidence": {"evidence_snippet": application_field.get("evidence_snippet"),
+                                         "extraction_method": application_field.get("extraction_method")}})
     elif job.get("recruiter_email"):
         candidates.append(_email_channel(job["recruiter_email"], job.get("canonical_url"), 85))
 
