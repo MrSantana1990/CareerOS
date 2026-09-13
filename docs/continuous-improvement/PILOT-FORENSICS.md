@@ -51,6 +51,22 @@ Fluxo real executado 100% pelo usuário: LinkedIn (post/imagem) → leitura visu
 
 Usado exclusivamente como benchmark de percepção (ver Perception Gap Matrix no relatório principal).
 
+## 5.1 ADENDO CRÍTICO — Gmail scanning quebrado durante o Pilot (achado em 13/09, 01:52 UTC)
+
+Ao tentar reconfirmar o thread do Deutsche Bank (leitura, sem envio), a chamada real ao Gmail falhou:
+
+```
+google.auth.exceptions.RefreshError: ('invalid_grant: Token has been expired or revoked.', ...)
+```
+
+Investigação no log confirmou que isso **não é transitório**: o último `GOOGLE_MAIL_SCANNED` bem-sucedido foi em **2026-09-11 23:16:07 UTC**. Desde então, `GOOGLE_MAIL_SCAN_FAILED` (`RefreshError`) se repete a cada ~10min, **159 tentativas consecutivas** até o momento desta auditoria (2026-09-13 01:46:47 UTC, a última antes de agora) — mais de **26 horas contínuas de falha**, ainda ativa.
+
+Causa raiz: o refresh token OAuth do Gmail foi revogado/expirado — mesma classe de problema já documentada no backlog para o InfoJobs ("renovar sessão"). **Não é corrigível por código** — exige reautorização humana real (fluxo de consentimento OAuth do Google), não uma correção cirúrgica de bug.
+
+Impacto direto na auditoria: qualquer resposta real de recrutador chegada após 2026-09-11 23:16 UTC é **invisível ao Core** hoje. Os números de `RECRUITER_RESPONSES`/`INTERVIEWS` deste relatório cobrem com confiança apenas até esse instante — para o restante da janela do Pilot (~26h), a resposta correta é `UNKNOWN`, nunca `0`.
+
+O mecanismo do scheduler (`google_mail_scheduler`) continua **AUTONOMOUS_OBSERVED** (dispara sozinho a cada ~10min, sem intervenção) — mas seu **resultado** está `FAILED` de forma contínua e ativa. Adicionado como item P0 no backlog.
+
 ## 6. Gaps comprovados (para o backlog)
 
 1. **Não existe scheduler que conecta Perception → Opportunity Brain → Action Engine.** Todo o volume de Signals/Jobs autônomos fica represado sem nunca virar Opportunity. Este é o gargalo #1, confirmado por evidência direta (0 Opportunities em 4 dias com 130 Signals + 96 Jobs disponíveis).
