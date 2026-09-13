@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -33,6 +34,10 @@ from .hard_blocks import assess_hard_blocks, extract_salary_brl
 from .kill_switches import fetch_kill_switches, is_paused
 from .market_signal_source import (DEFAULT_QUERIES, build_rss_url, classify_signal_type,
                                    fetch_rss, parse_rss_items, resolve_company)
+from .multimodal_perception import (classify_qr_destination, classify_vacancy_content,
+                                    decode_qr_from_image_bytes, extract_application_url_instruction,
+                                    extract_email_from_content, extract_whatsapp_contact,
+                                    image_content_hash, normalize_qr_payload, split_multi_vacancy_content)
 from .structured_fields import extract_all as extract_structured_fields
 from .structured_fields import extract_work_model
 from .url_policy import authenticated_application_url
@@ -294,6 +299,22 @@ class AIAdviceRequest(BaseModel):
     question: str = Field(min_length=2, max_length=4000)
     job_title: str = Field(default="", max_length=500)
     job_description: str = Field(default="", max_length=12000)
+
+
+class ContentPerceptionRequest(BaseModel):
+    """Fase 2, Prompt 13 - entrada de conteudo JA ADQUIRIDO (Secao 28:
+    acquisition != understanding). Nao existe crawler nenhum atras deste
+    endpoint - quem chama ja tem o texto (de uma pagina, de um post, ou ja
+    transcrito de uma imagem/card por um humano ou por um conector futuro)
+    e opcionalmente os bytes de uma imagem (so usados para decodificar QR
+    localmente, nunca para OCR - essa capacidade nao existe neste prompt,
+    gap reportado honestamente)."""
+
+    source_type: str = Field(default="UNKNOWN", max_length=40)
+    source_url: str | None = Field(default=None, max_length=1000)
+    company: str | None = Field(default=None, max_length=200)
+    text: str = Field(min_length=1, max_length=20000)
+    image_base64: str | None = Field(default=None, max_length=8_000_000)
 
 
 class GoogleDraftRequest(BaseModel):
@@ -2252,6 +2273,127 @@ def _post_signal(payload: dict) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
+async def _resolve_qr_evidence(payload: ContentPerceptionRequest) -> dict | None:
+    """Secao 8/9/10 - pipeline completo: DETECT (ja feito pelo caller, que
+    so manda a imagem se souber que ha um QR) -> DECODE -> NORMALIZE ->
+    CLASSIFY SCHEME -> so entao (e so se SAFE) resolve o destino via um
+    fetch real, bounded, ja existente (_fetch_public_page, Prompt 11) -
+    nunca segue um esquema unsafe/desconhecido, nunca executa payload
+    algum."""
+    if not payload.image_base64:
+        return None
+    try:
+        image_bytes = base64.b64decode(payload.image_base64, validate=True)
+    except Exception:
+        return None
+    decoded = decode_qr_from_image_bytes(image_bytes)
+    event("QR_DETECTED", source_url=payload.source_url, image_hash=image_content_hash(image_bytes))
+    if decoded["status"] != "QR_DECODED":
+        return {"qr_status": decoded["status"], "qr_destination": None}
+    event("QR_DECODED", source_url=payload.source_url)
+    normalized = normalize_qr_payload(decoded["payload"])
+    if normalized["scheme_classification"] != "SAFE":
+        event("QR_REJECTED_UNSAFE", source_url=payload.source_url,
+              scheme_classification=normalized["scheme_classification"])
+        return {"qr_status": "QR_DECODED", "qr_destination": "UNKNOWN",
+                "qr_scheme_classification": normalized["scheme_classification"]}
+    final_url = None
+    if normalized["scheme"] in {"http", "https"}:
+        probe = await asyncio.to_thread(_fetch_public_page, normalized["raw_payload"])
+        final_url = probe.get("final_url")
+    ats_match = detect_ats(final_url) if final_url else None
+    # company_domain nao esta disponivel aqui sem uma consulta extra ao
+    # Core (companies.domain, Prompt 11) - sem ele, o pior caso e
+    # classificar como EXTERNAL_ATS/EXTERNAL_FORM em vez de
+    # OFFICIAL_ATS/OFFICIAL_CAREERS, nunca o contrario (conservador por
+    # construcao, nunca superestima confianca).
+    destination = classify_qr_destination(normalized, final_url=final_url, is_known_ats=bool(ats_match))
+    return {"qr_status": "QR_DECODED", "qr_raw_payload": normalized["raw_payload"],
+            "qr_final_url": final_url, "qr_destination": destination}
+
+
+async def perceive_multimodal_content(payload: ContentPerceptionRequest) -> dict:
+    """Fase 2, Prompt 13 - CONTENT PERCEPTION. Recebe conteudo JA
+    ADQUIRIDO (Secao 28) e o leva pelo MESMO caminho que qualquer outra
+    vaga ja percorre (Secao 18: nunca um pipeline paralelo) - Job via
+    build_job_record/enqueue_core_sync (identico a sync_job_to_core) ou
+    Signal via _post_signal quando o conteudo nao e estruturado o
+    bastante ou a empresa nao pode ser determinada com seguranca (nunca
+    inventar company - Secao 5/18)."""
+    event("CONTENT_PERCEPTION_STARTED", source_type=payload.source_type, source_url=payload.source_url)
+    classification = classify_vacancy_content(payload.text)
+    qr_evidence = await _resolve_qr_evidence(payload)
+    if classification["classification"] == "NON_VACANCY":
+        event("VACANCY_VISUAL_REJECTED", source_url=payload.source_url, evidence=classification["evidence"])
+        result = {"status": "NON_VACANCY", "classification": classification}
+        event("CONTENT_PERCEPTION_COMPLETED", source_url=payload.source_url, status="NON_VACANCY")
+        return result
+    event("VACANCY_VISUAL_DETECTED", source_url=payload.source_url, classification=classification["classification"],
+          confidence=classification["confidence"])
+    email_evidence = extract_email_from_content(payload.text, source_url=payload.source_url)
+    if email_evidence:
+        event("DIRECT_EMAIL_DETECTED", source_url=payload.source_url)
+    whatsapp_evidence = extract_whatsapp_contact(payload.text)
+    if whatsapp_evidence and whatsapp_evidence["classification"] == "EXPLICIT_RECRUITING_WHATSAPP":
+        event("DIRECT_WHATSAPP_DETECTED", source_url=payload.source_url)
+    url_instruction = extract_application_url_instruction(payload.text, source_url=payload.source_url)
+    roles = split_multi_vacancy_content(payload.text)
+    multimodal_extraction = {
+        key: value for key, value in {
+            "multimodal_email": email_evidence,
+            "multimodal_whatsapp": whatsapp_evidence,
+            "multimodal_application_url": url_instruction,
+            "multimodal_qr": qr_evidence,
+        }.items() if value
+    }
+    if classification["classification"] == "VACANCY_CANDIDATE" and payload.company:
+        created_jobs = []
+        for role_text in roles:
+            structured = extract_structured_fields(payload.text, source_url=payload.source_url) or {}
+            structured.update(multimodal_extraction)
+            structured["source_type"] = {"value": {"source_type": payload.source_type}, "confidence": 100,
+                                          "evidence_snippet": payload.source_type,
+                                          "extraction_method": "caller_supplied"}
+            correlation_id = str(uuid.uuid4())
+            record = build_job_record(
+                source=payload.source_type,
+                source_url=payload.source_url or f"multimodal:{image_content_hash(payload.text.encode('utf-8'))}",
+                company=payload.company[:200],
+                title=role_text[:240],
+                description=payload.text[:12000],
+                location="",
+                correlation_id=correlation_id,
+                recruiter_email=(email_evidence or {}).get("value", {}).get("recruiting_email"),
+                application_channel=(qr_evidence or {}).get("qr_destination")
+                if (qr_evidence or {}).get("qr_destination") not in (None, "UNKNOWN") else None,
+                structured_extraction=structured,
+            )
+            enqueue_core_sync(record)
+            created_jobs.append({"title": role_text, "idempotency_key": record.idempotency_key})
+            event("MULTIMODAL_JOB_INGESTED", source_url=payload.source_url, title=role_text,
+                  idempotency_key=record.idempotency_key)
+        result = {"status": "JOBS_INGESTED", "classification": classification, "jobs": created_jobs,
+                  "evidence": multimodal_extraction}
+        event("CONTENT_PERCEPTION_COMPLETED", source_url=payload.source_url, status="JOBS_INGESTED",
+              jobs=len(created_jobs))
+        return result
+    signal = _post_signal({
+        "type": "HIRING_ANNOUNCEMENT",
+        "source_url": payload.source_url,
+        "source_type": payload.source_type,
+        "headline": (roles[0] if roles else payload.text)[:300],
+        "summary": payload.text[:2000],
+        "confidence": classification["confidence"],
+        "evidence": {"classification": classification, **multimodal_extraction,
+                     "company_known": bool(payload.company)},
+    })
+    event("MULTIMODAL_SIGNAL_CREATED", source_url=payload.source_url, signal_id=signal.get("id"))
+    result = {"status": "SIGNAL_CREATED", "classification": classification, "signal": signal,
+              "evidence": multimodal_extraction}
+    event("CONTENT_PERCEPTION_COMPLETED", source_url=payload.source_url, status="SIGNAL_CREATED")
+    return result
+
+
 async def market_scan() -> dict:
     """Perception Engine v1 (Fase 2, Prompt 3) - unica fonte real de Market
     Signal em producao hoje (ver Source Selection Report do Prompt 3):
@@ -3133,6 +3275,24 @@ async def get_jobs() -> list[dict]:
     if not RESULTS.exists():
         return []
     return json.loads(RESULTS.read_text(encoding="utf-8"))
+
+
+@app.post("/content/perceive")
+async def content_perceive(payload: ContentPerceptionRequest) -> dict:
+    """Fase 2, Prompt 13 - unico ponto de entrada para conteudo multimodal
+    JA ADQUIRIDO (texto de post/card/pagina, opcionalmente bytes de uma
+    imagem so para decodificar QR). Nao existe nenhum crawler atras deste
+    endpoint - AUTONOMOUS_SOCIAL_ACQUISITION continua NAO disponivel
+    (Secao 28/29); isso e o ponto de entrada que um operador humano ou um
+    futuro conector legitimo usaria para entregar conteudo real. Nenhuma
+    candidatura, e-mail ou mensagem de WhatsApp e enviado aqui - so
+    classificacao, extracao de evidencia e ingestao no MESMO pipeline
+    (Job via Core / Signal) ja usado pelo resto do sistema."""
+    try:
+        return await perceive_multimodal_content(payload)
+    except Exception as exc:
+        event("CONTENT_PERCEPTION_FAILED", source_url=payload.source_url, error=type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Falha ao processar conteúdo multimodal.") from exc
 
 
 @app.get("/profile")
