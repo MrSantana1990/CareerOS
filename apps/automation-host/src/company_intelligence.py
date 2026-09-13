@@ -131,6 +131,85 @@ def can_enrich_job(correlation: str) -> bool:
     return correlation in _ENRICHABLE_CORRELATION_LEVELS
 
 
+def classify_job_correlation_among_candidates(candidates: list[dict], target_job: dict) -> str:
+    """Fase 2, Prompt 12, Secao 3 - quando MULTIPLOS candidatos da mesma
+    pagina batem parcialmente com o Job alvo (ex.: 2 vagas com o mesmo
+    titulo em cidades diferentes), nunca escolher um as cegas -
+    AMBIGUOUS impede qualquer enrichment (Teste D)."""
+    results = [classify_job_correlation(candidate, target_job) for candidate in candidates]
+    if "EXACT_JOB_MATCH" in results:
+        return "EXACT_JOB_MATCH"
+    high_confidence_count = results.count("HIGH_CONFIDENCE_MATCH")
+    if high_confidence_count >= 2:
+        return "AMBIGUOUS"
+    if high_confidence_count == 1:
+        return "HIGH_CONFIDENCE_MATCH"
+    if "COMPANY_ONLY" in results:
+        return "COMPANY_ONLY"
+    return "NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# Secao 3/4 - GENERIC (NON-ATS) PAGE CORRELATION / ACTIVE JOB VALIDATION
+# ---------------------------------------------------------------------------
+
+# Nem toda careers page encontrada (Company Intelligence, Prompt 11) e um
+# ATS estruturado com API/listagem - a maioria das empresas reais da
+# amostra tem so uma pagina institucional propria. Para essas, o unico
+# correlator possivel e uma busca textual conservadora - nunca um match
+# por palavra isolada ("Analista" apareceria em qualquer pagina de RH).
+_MIN_TITLE_WORDS_FOR_GENERIC_MATCH = 3
+
+JOB_STATUS_STATES = ("ACTIVE", "CLOSED", "NOT_FOUND", "UNKNOWN")
+
+_ACTIVE_PAGE_MARKERS = ("candidatar", "candidate se", "apply now", "apply for this job",
+                        "inscreva se", "enviar candidatura", "vaga aberta", "inscricoes abertas")
+_CLOSED_PAGE_MARKERS = ("vaga encerrada", "vaga preenchida", "position closed", "position has been filled",
+                        "no longer accepting applications", "esta vaga nao esta mais disponivel",
+                        "processo seletivo encerrado")
+
+
+def search_job_title_in_page(title: str, body_snippet: str | None) -> bool:
+    """Correlator generico (sem ATS conhecido) - o titulo normalizado
+    completo (nunca uma palavra isolada) precisa aparecer literalmente no
+    corpo real da pagina. Titulos curtos demais (&lt;3 palavras) nunca
+    correlacionam com seguranca aqui - risco de falso positivo."""
+    title_norm = _normalize(title or "")
+    if len(title_norm.split()) < _MIN_TITLE_WORDS_FOR_GENERIC_MATCH:
+        return False
+    body_norm = _normalize(str(body_snippet or ""))
+    return bool(title_norm) and title_norm in body_norm
+
+
+def classify_generic_page_correlation(title: str, body_snippet: str | None) -> str:
+    """Quando nao existe ATS conhecido (Greenhouse/Lever/Ashby) - so um
+    corpo de pagina bruto para revisitar. HIGH_CONFIDENCE_MATCH exige o
+    titulo completo aparecendo literalmente; caso contrario COMPANY_ONLY
+    (a pagina existe mas nao lista esta vaga especifica, Secao 6 - nunca
+    NOT_FOUND aqui, pois a empresa/pagina foi de fato encontrada)."""
+    if search_job_title_in_page(title, body_snippet):
+        return "HIGH_CONFIDENCE_MATCH"
+    return "COMPANY_ONLY"
+
+
+def classify_job_page_status(status_code: int | None, body_snippet: str | None, title_matched: bool) -> str:
+    """Secao 4: nunca considera HTTP 200 sozinho como prova de vaga ativa.
+    So classifica ACTIVE/CLOSED quando o titulo foi de fato encontrado na
+    pagina (title_matched) E existe uma marca textual real de estado."""
+    if status_code is None:
+        return "UNKNOWN"
+    if status_code != 200:
+        return "NOT_FOUND"
+    if not title_matched:
+        return "NOT_FOUND"
+    body_norm = _normalize(str(body_snippet or ""))
+    if any(_normalize(marker) in body_norm for marker in _CLOSED_PAGE_MARKERS):
+        return "CLOSED"
+    if any(_normalize(marker) in body_norm for marker in _ACTIVE_PAGE_MARKERS):
+        return "ACTIVE"
+    return "UNKNOWN"
+
+
 # ---------------------------------------------------------------------------
 # Secao 7/11 - WORK MODEL RESOLUTION (SOURCE PRIORITY)
 # ---------------------------------------------------------------------------

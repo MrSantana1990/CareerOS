@@ -186,8 +186,23 @@ def resolve_required_technology_tokens(structured_extraction: dict | None) -> li
 
 def resolve_structured_work_model(structured_extraction: dict | None) -> str | None:
     """Fallback quando job.work_model (coluna plana) esta vazio (Secao 11).
-    Nunca usa um campo contaminado por UI/sidebar (Secao 3)."""
-    field = (structured_extraction or {}).get("work_model")
+    Nunca usa um campo contaminado por UI/sidebar (Secao 3).
+
+    Fase 2, Prompt 12, Secao 10 (field-level merge por precedencia):
+    'work_model_official' (escrito so por POST /jobs/{id}/enrich-official,
+    apos correlacao EXACT/HIGH_CONFIDENCE com a vaga especifica numa fonte
+    oficial - OFFICIAL_JOB_PAGE) tem prioridade sobre o 'work_model' comum
+    (TRUSTED_STRUCTURED_EXTRACTION, extraido no scrape original) - nunca o
+    contrario, e nunca overwrite bruto: as duas chaves continuam
+    persistidas lado a lado, so a leitura prioriza a oficial."""
+    extraction = structured_extraction or {}
+    official_field = extraction.get("work_model_official")
+    if is_structured_field_trustworthy(official_field):
+        official_value = (official_field or {}).get("value") or {}
+        official_work_model = official_value.get("work_model")
+        if official_work_model and str(official_work_model).upper() != "UNKNOWN":
+            return str(official_work_model)
+    field = extraction.get("work_model")
     if not is_structured_field_trustworthy(field):
         return None
     value = (field or {}).get("value") or {}
