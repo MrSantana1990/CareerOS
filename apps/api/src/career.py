@@ -726,7 +726,7 @@ async def reconcile_duplicate_jobs(dry_run: bool = True, slug: str = Depends(req
     org_id = await organization_id(slug)
     async with SessionLocal() as session:
         rows = [dict(row) for row in (await session.execute(text("""
-            SELECT id, source, source_url, canonical_url, company_id, title, location, discovered_at
+            SELECT id, source, source_url, canonical_url, company_id, title, location, discovered_at, fingerprint
             FROM jobs WHERE organization_id=:organization_id AND deleted_at IS NULL AND dedup_status='CANONICAL'
         """), {"organization_id": org_id})).mappings()]
         jobs = [{**row, "id": str(row["id"]), "company_id": str(row["company_id"]) if row["company_id"] else None}
@@ -734,6 +734,34 @@ async def reconcile_duplicate_jobs(dry_run: bool = True, slug: str = Depends(req
         jobs_by_id = {job["id"]: job for job in jobs}
 
         grouping = group_duplicate_jobs(jobs)
+        # Achado real de producao (validacao deste prompt): dentro de um
+        # grupo EXACT_PROVIDER_ID, um membro ingerido DEPOIS da correcao
+        # 9.1 (via ingest_job) ja carrega o fingerprint novo (por
+        # provider_id) - mas group_duplicate_jobs escolhe o canonico so
+        # por discovered_at (mais antigo), que pode ser um membro mais
+        # velho ainda com o fingerprint ANTIGO (por conteudo). Tentar
+        # realinhar o fingerprint desse canonico colidiria com o valor ja
+        # existente no membro mais novo (violacao real de UniqueConstraint
+        # organization_id+fingerprint). Corrigido promovendo a canonico
+        # quem ja carrega o fingerprint correto, em vez de tentar
+        # sobrescrever um valor que ja pertence a outra linha do MESMO
+        # grupo real.
+        for group in grouping["auto_mergeable"]:
+            member_ids = [group["canonical_job_id"], *group["duplicate_job_ids"]]
+            target_fingerprint, target_method, _ = canonical_job_fingerprint(
+                company="", title="", location="", description="",
+                source=jobs_by_id[member_ids[0]].get("source"),
+                source_url=jobs_by_id[member_ids[0]].get("source_url"),
+                canonical_url=jobs_by_id[member_ids[0]].get("canonical_url"),
+            )
+            if target_method != "PROVIDER_ID":
+                continue
+            already_correct = next((job_id for job_id in member_ids
+                                     if jobs_by_id[job_id].get("fingerprint") == target_fingerprint), None)
+            if already_correct and already_correct != group["canonical_job_id"]:
+                group["duplicate_job_ids"] = [job_id for job_id in member_ids if job_id != already_correct]
+                group["canonical_job_id"] = already_correct
+
         applied: list[dict] = []
         rejected: list[dict] = []
         for group in grouping["auto_mergeable"]:
