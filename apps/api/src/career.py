@@ -22,6 +22,7 @@ from .communications import notification_priority
 from .tracking import (aggregate_by_dimension, aggregate_gap_intelligence, calculate_conversion_funnel,
                         classify_correlation, group_interventions_by_root_cause)
 from .channel_discovery import discover_company_channel_candidates, discover_job_channel_candidates
+from .channel_verification import verify_channel_candidate
 from .profile_intelligence import extract_docx_text, extract_profile_evidence
 from .market_memory import opportunity_fingerprint, signal_fingerprint, watch_fingerprint
 from .opportunity_brain import (BRAIN_VERSION, BrainDecision, evaluate_job_opportunity,
@@ -1303,19 +1304,28 @@ def environment_auto_apply_enabled_for_api() -> bool:
 
 
 def _aggregate_channel_trust(channels: list[dict]) -> tuple[str | None, dict | None]:
-    """Prioriza o pior caso material (CAPTCHA/AUTH) sobre um canal
-    VERIFIED_AVAILABLE que porventura tambem exista, e so devolve um canal
-    selecionado quando ha um VERIFIED_AVAILABLE de verdade (Secao 6/7)."""
+    """Fase 2, Prompt 9, Secao 12 (CAPTCHA/AUTH fallback): um canal seguro
+    (VERIFIED_AVAILABLE) e procurado PRIMEIRO entre TODOS os canais - so
+    depois disso, se nenhum existir, o pior caso material (CAPTCHA/AUTH)
+    determina o resultado. Bug real corrigido aqui (achado por auditoria de
+    codigo, Prompt 9): a versao anterior fazia o oposto (`any CAPTCHA/AUTH`
+    ANTES de chamar select_channel), entao uma unica linha antiga
+    CAPTCHA/AUTH em opportunity_channels (nunca deletada - so upsert)
+    bloqueava permanentemente qualquer canal melhor descoberto depois para
+    a mesma Opportunity, mesmo quando `select_channel` teria escolhido
+    corretamente. discovery_source != application_channel: LinkedIn/InfoJobs
+    exigirem CAPTCHA/AUTH nunca deveria, por si so, impedir um ATS/e-mail/
+    careers oficial verificado que exista ao lado."""
     if not channels:
         return None, None
+    selected = select_channel(channels)
+    if selected:
+        return "VERIFIED_AVAILABLE", selected
     trusts = [(item, classify_channel_trust(item)) for item in channels]
     if any(trust == "CAPTCHA_REQUIRED" for _, trust in trusts):
         return "CAPTCHA_REQUIRED", None
     if any(trust == "AUTH_REQUIRED" for _, trust in trusts):
         return "AUTH_REQUIRED", None
-    selected = select_channel(channels)
-    if selected:
-        return "VERIFIED_AVAILABLE", selected
     for _, trust in trusts:
         if trust in {"BOT_GATED", "STALE", "UNVERIFIABLE", "UNAVAILABLE"}:
             return trust, None
@@ -1811,7 +1821,7 @@ async def discover_channels(opportunity_id: UUID, slug: str = Depends(require_ad
         if not opportunity:
             raise HTTPException(status_code=404, detail="Opportunity não encontrada.")
         company = dict((await session.execute(text(
-            "SELECT careers_url, official_recruiting_email, talent_pool_url, ats_type "
+            "SELECT domain, careers_url, official_recruiting_email, talent_pool_url, ats_type "
             "FROM companies WHERE id=:id"
         ), {"id": opportunity["company_id"]})).mappings().first() or {})
 
@@ -1829,8 +1839,18 @@ async def discover_channels(opportunity_id: UUID, slug: str = Depends(require_ad
         else:
             candidates = discover_company_channel_candidates(company)
 
+        # Fase 2, Prompt 9, Secao 3: channel_discovery.py so DESCOBRE
+        # candidatos (sempre status='CANDIDATE') - a VERIFICACAO (promocao
+        # para 'VERIFIED' com evidencia real de trust de e-mail/ATS) e uma
+        # etapa separada e testavel (channel_verification.py), nunca
+        # misturada com a descoberta pura.
+        verified_candidates = [verify_channel_candidate(candidate, company) for candidate in candidates]
+
         created = []
-        for candidate in candidates:
+        for candidate in verified_candidates:
+            candidate = dict(candidate)
+            candidate_evidence = candidate.pop("evidence", None) or {}
+            evidence_payload = {"discovery": "channel_population_v1", **candidate_evidence}
             row = (await session.execute(text("""
                 INSERT INTO opportunity_channels (id, organization_id, opportunity_id, type, url_or_email,
                   source, confidence, requires_auth, requires_captcha, requires_human, status, evidence)
@@ -1838,11 +1858,11 @@ async def discover_channels(opportunity_id: UUID, slug: str = Depends(require_ad
                   :source, :confidence, :requires_auth, :requires_captcha, :requires_human, :status,
                   CAST(:evidence AS jsonb))
                 ON CONFLICT (opportunity_id, type, url_or_email) DO UPDATE SET
-                  confidence=EXCLUDED.confidence, evidence=EXCLUDED.evidence, updated_at=now()
+                  confidence=EXCLUDED.confidence, status=EXCLUDED.status, evidence=EXCLUDED.evidence, updated_at=now()
                 RETURNING id, (xmax = 0) AS created
             """), {"organization_id": org_id, "opportunity_id": opportunity_id,
-                    "evidence": json.dumps({"discovery": "channel_population_v1"}), **candidate})).mappings().one()
-            created.append({**candidate, "id": row["id"], "created": row["created"]})
+                    "evidence": json.dumps(evidence_payload), **candidate})).mappings().one()
+            created.append({**candidate, "evidence": evidence_payload, "id": row["id"], "created": row["created"]})
         await session.commit()
     return {"opportunity_id": opportunity_id, "candidates": created}
 
