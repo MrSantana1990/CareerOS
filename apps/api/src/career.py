@@ -710,6 +710,36 @@ async def ingest_job(payload: JobInput, slug: str = Depends(require_admin)) -> d
             "created": created, "deduplicated": not created}
 
 
+class JobEnrichmentInput(BaseModel):
+    structured_extraction: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/jobs/{job_id}/enrich-official")
+async def enrich_job_from_official_source(job_id: UUID, payload: JobEnrichmentInput,
+                                           slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Fase 2, Prompt 12: merge ADITIVO de evidencia oficial (correlacionada
+    a uma vaga ESPECIFICA - EXACT_JOB_MATCH/HIGH_CONFIDENCE_MATCH, nunca
+    COMPANY_ONLY, Secao 3/6) dentro de jobs.structured_extraction - nunca
+    overwrite bruto do Job (Secao 10). O caller usa chaves proprias (ex.:
+    'work_model_official') para nao colidir com o que a extracao original
+    (Prompt 3) ja gravou - quality.resolve_structured_work_model preferre
+    a chave oficial quando presente e confiavel."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        updated_id = await session.scalar(text("""
+            UPDATE jobs SET
+              structured_extraction = COALESCE(structured_extraction, '{}'::jsonb) || CAST(:extra AS jsonb),
+              updated_at = now()
+            WHERE id=:job_id AND organization_id=:organization_id AND deleted_at IS NULL
+            RETURNING id
+        """), {"job_id": job_id, "organization_id": org_id,
+               "extra": json.dumps(payload.structured_extraction)})
+        if not updated_id:
+            raise HTTPException(status_code=404, detail="Vaga não encontrada.")
+        await session.commit()
+    return {"id": updated_id, "updated": True}
+
+
 @router.post("/jobs/reconcile-duplicates")
 async def reconcile_duplicate_jobs(dry_run: bool = True, slug: str = Depends(require_admin)) -> dict[str, Any]:
     """Fase 2, Prompt 9.1 - reconciliacao NAO-DESTRUTIVA de Jobs duplicados

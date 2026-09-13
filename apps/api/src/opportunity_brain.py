@@ -19,7 +19,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import re
 
-from .quality import SKILL_FAMILIES, ScoreResult, is_structured_field_trustworthy, normalize
+from .quality import (
+    SKILL_FAMILIES, ScoreResult, is_structured_field_trustworthy, normalize, resolve_structured_work_model,
+)
 
 BRAIN_VERSION = "1.0"
 
@@ -361,9 +363,11 @@ def evaluate_location_work_model(structured_extraction: dict | None, job: dict, 
     vaga. is_structured_field_trustworthy (quality.py) descarta esses casos
     (nunca os trata como fato) antes de qualquer decisao aqui."""
     extraction = structured_extraction or {}
-    work_model_field = extraction.get("work_model") or {}
-    trusted_work_model = (work_model_field.get("value") or {}).get("work_model") \
-        if is_structured_field_trustworthy(work_model_field) else None
+    # Fase 2, Prompt 12, Secao 10/21: reusa o MESMO resolver de score_job
+    # (quality.resolve_structured_work_model) - ja prioriza
+    # 'work_model_official' (correlacao real por vaga, Prompt 12) sobre o
+    # 'work_model' comum, nunca duplicado aqui.
+    trusted_work_model = resolve_structured_work_model(extraction)
     work_model = str(trusted_work_model or job.get("work_model") or "UNKNOWN").upper()
     desired_models = {str(item).upper() for item in (profile.get("work_models") or [])}
     location_field = extraction.get("location") or {}

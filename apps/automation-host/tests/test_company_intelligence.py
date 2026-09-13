@@ -4,8 +4,9 @@ Testes A-N (parte pura) da Secao 22. Todo I/O real e injetado pelo caller
 nao tem nenhuma dependencia externa viva."""
 
 from src.company_intelligence import (
-    can_enrich_job, classify_careers_probe, classify_domain_probe, classify_job_correlation,
-    extract_domain_candidate_from_email, resolve_work_model_with_priority,
+    can_enrich_job, classify_careers_probe, classify_domain_probe, classify_generic_page_correlation,
+    classify_job_correlation, classify_job_correlation_among_candidates, classify_job_page_status,
+    extract_domain_candidate_from_email, resolve_work_model_with_priority, search_job_title_in_page,
 )
 
 
@@ -186,3 +187,100 @@ def test_q_module_never_imports_network_or_send_functions():
     source = inspect.getsource(module)
     for forbidden in ("urlopen(", "requests.", "send_application_email", "import socket"):
         assert forbidden not in source
+
+
+# Fase 2, Prompt 12 - Specific Job Correlation & Official Job Enrichment ------------------------------------
+# Testes A-T da Secao 20.
+
+# A: exact requisition ID match ------------------------------------------------------------------------------
+
+def test_a_exact_requisition_id_match():
+    candidate = {"provider_job_id": "REQ-12345", "title": "Something Else Entirely"}
+    target = {"external_id": "REQ-12345", "title": "Analista de Dados Pleno"}
+    assert classify_job_correlation(candidate, target) == "EXACT_JOB_MATCH"
+
+
+# B: exact official URL match (covered via provider_job_id derived from canonical_url upstream - see job_identity.py) --
+
+def test_b_no_provider_id_falls_back_to_title_location_match():
+    candidate = {"title": "Analista de Dados Pleno", "location": "Sao Paulo"}
+    target = {"title": "Analista de Dados Pleno", "location": "Sao Paulo"}
+    assert classify_job_correlation(candidate, target) == "HIGH_CONFIDENCE_MATCH"
+
+
+# C: title/company/location high-confidence match (single candidate) already covered in test_f_* above ------------
+
+# D: ambiguous same-title jobs do not merge --------------------------------------------------------------------------
+
+def test_d_two_high_confidence_candidates_are_ambiguous_never_merged():
+    candidates = [
+        {"title": "Analista de Dados Pleno", "location": "Sao Paulo"},
+        {"title": "Analista de Dados Pleno", "location": "Sao Paulo"},
+    ]
+    target = {"title": "Analista de Dados Pleno", "location": "Sao Paulo"}
+    correlation = classify_job_correlation_among_candidates(candidates, target)
+    assert correlation == "AMBIGUOUS"
+    assert not can_enrich_job(correlation)
+
+
+def test_d_single_high_confidence_among_many_company_only_still_resolves():
+    candidates = [
+        {"company_only": True, "title": "Analista de Suporte"},
+        {"title": "Analista de Dados Pleno", "location": "Sao Paulo"},
+    ]
+    target = {"title": "Analista de Dados Pleno", "location": "Sao Paulo"}
+    assert classify_job_correlation_among_candidates(candidates, target) == "HIGH_CONFIDENCE_MATCH"
+
+
+# E: company-only page does not enrich job (generic correlator, real Zeleno Meds page shape) --------------------------
+
+def test_e_generic_company_page_without_the_job_title_is_company_only():
+    # Achado real de producao: a careers page real da Zeleno Meds
+    # ("Trabalhe Conosco") e um formulario generico de contato - nenhum
+    # titulo de vaga especifico aparece nela.
+    body = "Trabalhe Conosco ZELENO Premium Cannabis. Preencha o formulario e envie seu curriculo."
+    correlation = classify_generic_page_correlation("Analista de Dados / DBA / Engenheiro(a) de Dados - Pleno", body)
+    assert correlation == "COMPANY_ONLY"
+    assert not can_enrich_job(correlation)
+
+
+def test_e_short_title_never_correlates_generically_even_if_substring_present():
+    # "Analista" sozinho apareceria em qualquer pagina de RH - nunca uma
+    # correlacao segura por palavra isolada.
+    assert search_job_title_in_page("Analista", "Vagas para Analista disponiveis") is False
+
+
+# F/G: active/closed official job -------------------------------------------------------------------------------------
+
+def test_f_active_official_job_requires_both_title_match_and_a_real_active_marker():
+    body = "Analista de Dados Pleno - Sao Paulo. Candidate-se agora, vaga aberta!"
+    matched = search_job_title_in_page("Analista de Dados Pleno", body)
+    assert matched is True
+    assert classify_job_page_status(200, body, matched) == "ACTIVE"
+
+
+def test_g_closed_official_job_detected_from_a_real_closed_marker():
+    body = "Analista de Dados Pleno - Sao Paulo. Esta vaga nao esta mais disponivel."
+    matched = search_job_title_in_page("Analista de Dados Pleno", body)
+    assert classify_job_page_status(200, body, matched) == "CLOSED"
+
+
+def test_status_200_alone_is_never_proof_of_active():
+    # Secao 4: "Nao considerar HTTP 200 sozinho como prova de vaga ativa."
+    body = "Bem-vindo ao nosso site institucional."
+    matched = search_job_title_in_page("Analista de Dados Pleno", body)
+    assert matched is False
+    assert classify_job_page_status(200, body, matched) == "NOT_FOUND"
+
+
+def test_status_unreachable_is_unknown_not_not_found():
+    assert classify_job_page_status(None, None, False) == "UNKNOWN"
+
+
+# K: unknown preserved when title matches but no state marker exists ---------------------------------------------------
+
+def test_k_title_matched_without_any_state_marker_stays_unknown():
+    body = "Analista de Dados Pleno - Sao Paulo. Sobre a vaga: trabalhamos com dados todos os dias."
+    matched = search_job_title_in_page("Analista de Dados Pleno", body)
+    assert matched is True
+    assert classify_job_page_status(200, body, matched) == "UNKNOWN"

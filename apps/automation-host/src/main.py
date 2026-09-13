@@ -19,8 +19,9 @@ from playwright.async_api import BrowserContext, Frame, Page, Playwright, async_
 from .anti_spam import remaining_daily_quota
 from .ats_detection import ATSMatch, detect_ats
 from .company_intelligence import (
-    CAREERS_PROBE_PATHS, classify_careers_probe, classify_domain_probe,
-    extract_domain_candidate_from_email,
+    CAREERS_PROBE_PATHS, can_enrich_job, classify_careers_probe, classify_domain_probe,
+    classify_generic_page_correlation, classify_job_page_status, extract_domain_candidate_from_email,
+    search_job_title_in_page,
 )
 from .core_bridge import (CoreSyncRecord, build_job_record, build_prepare_record,
                           build_score_record, build_transition_record, guess_company, is_due,
@@ -33,6 +34,7 @@ from .kill_switches import fetch_kill_switches, is_paused
 from .market_signal_source import (DEFAULT_QUERIES, build_rss_url, classify_signal_type,
                                    fetch_rss, parse_rss_items, resolve_company)
 from .structured_fields import extract_all as extract_structured_fields
+from .structured_fields import extract_work_model
 from .url_policy import authenticated_application_url
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -68,6 +70,11 @@ GOOGLE_HEALTH_ALERT_THRESHOLD = 3
 COMPANY_INTELLIGENCE_BATCH_SIZE = 10
 COMPANY_INTELLIGENCE_COOLDOWN_DAYS = 7
 COMPANY_INTELLIGENCE_PROBE_TIMEOUT = 10
+# Fase 2, Prompt 12 - Job Correlation: mesma disciplina de batch/timeout/
+# bounded-concurrency (Secao 18) - so companies que JA tem careers_url
+# verificado (Prompt 11), e no maximo N jobs por empresa por ciclo.
+JOB_CORRELATION_COMPANY_BATCH_SIZE = 10
+JOB_CORRELATION_MAX_JOBS_PER_COMPANY = 20
 OPPORTUNITY_ASSEMBLY_HEALTH = RUNTIME / "opportunity_assembly" / "health.json"
 OPPORTUNITY_ASSEMBLY_JOB_BATCH = 25
 OPPORTUNITY_ASSEMBLY_SIGNAL_BATCH = 50
@@ -2049,6 +2056,7 @@ async def startup_scheduler() -> None:
     asyncio.create_task(watch_recheck_scheduler())
     asyncio.create_task(opportunity_assembly_scheduler())
     asyncio.create_task(company_intelligence_scheduler())
+    asyncio.create_task(job_correlation_scheduler())
 
 
 @app.get("/health")
@@ -2862,6 +2870,135 @@ async def company_intelligence_scheduler() -> None:
                 await company_intelligence_cycle()
             except Exception as exc:
                 event("COMPANY_INTELLIGENCE_FAILED", error=type(exc).__name__)
+        await asyncio.sleep(60)
+
+
+def _enrich_job_official(job_id: str, structured_extraction_patch: dict) -> dict:
+    """Fase 2, Prompt 12: merge aditivo em jobs.structured_extraction via
+    POST /jobs/{id}/enrich-official (ja idempotente/COALESCE no Core) -
+    nunca cria Application, nunca envia nada."""
+    request = Request(CAREER_API_URL + f"/api/v1/jobs/{job_id}/enrich-official",
+                       data=json.dumps({"structured_extraction": structured_extraction_patch}).encode("utf-8"),
+                       method="POST",
+                       headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"})
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+async def _correlate_and_enrich_job(job: dict, careers_url: str) -> dict:
+    """Fase 2, Prompt 12, Secoes 3-5: correlaciona o Job canonico com a
+    careers page ja verificada da empresa (Prompt 11) via busca textual
+    conservadora (nenhum ATS estruturado real foi encontrado na amostra
+    ate agora - Secao 2). So enriquece work_model quando a correlacao e
+    HIGH_CONFIDENCE/EXACT E o estado da vaga e comprovadamente ACTIVE
+    (nunca a partir de uma pagina COMPANY_ONLY ou de estado UNKNOWN/CLOSED -
+    Secao 4/6)."""
+    probe = await asyncio.to_thread(_fetch_public_page, careers_url)
+    title = str(job.get("title") or "")
+    if probe["status_code"] != 200:
+        return {"correlation": "NOT_FOUND", "status": "UNKNOWN", "enriched": False}
+    correlation = classify_generic_page_correlation(title, probe["body_snippet"])
+    matched = search_job_title_in_page(title, probe["body_snippet"])
+    status = classify_job_page_status(probe["status_code"], probe["body_snippet"], matched)
+    enriched = False
+    if can_enrich_job(correlation) and status == "ACTIVE":
+        work_model_field = extract_work_model(probe["body_snippet"] or "")
+        work_model_value = (work_model_field.get("value") or {}).get("work_model")
+        if work_model_value and str(work_model_value).upper() != "UNKNOWN":
+            patch = {"work_model_official": {**work_model_field, "source_url": careers_url}}
+            await asyncio.to_thread(_enrich_job_official, job["id"], patch)
+            enriched = True
+            event("JOB_WORK_MODEL_RESOLVED", job_id=job["id"], work_model=work_model_value)
+    return {"correlation": correlation, "status": status, "enriched": enriched}
+
+
+async def job_correlation_cycle() -> dict:
+    """Fase 2, Prompt 12 - camada minima de correlacao de vaga especifica.
+    Opera SOMENTE sobre companies que ja tem careers_url verificado
+    (Prompt 11) e Jobs canonicos (nunca duplicate, Prompt 9.1) dessa
+    empresa. Nao cria Opportunity nova; reavalia Score/Brain de forma
+    idempotente so quando um enrichment real acontece (Secao 15)."""
+    if not CAREER_ADMIN_TOKEN:
+        event("JOB_CORRELATION_SKIPPED", reason="missing_admin_token")
+        return {"jobs_evaluated": 0}
+    started = datetime.now(UTC)
+    event("JOB_CORRELATION_STARTED")
+    metrics = {"jobs_evaluated": 0, "exact_matches": 0, "high_confidence_matches": 0, "ambiguous": 0,
+               "not_found": 0, "active": 0, "closed": 0, "work_model_resolved": 0,
+               "official_channels_found": 0, "brain_decisions_changed": 0, "failed": 0}
+    try:
+        companies = await asyncio.to_thread(_fetch_companies_for_intelligence)
+        companies_with_careers = [item for item in companies if item.get("careers_url")]
+        companies_with_careers = companies_with_careers[:JOB_CORRELATION_COMPANY_BATCH_SIZE]
+        for company in companies_with_careers:
+            try:
+                jobs = await asyncio.to_thread(_fetch_company_jobs, company["id"])
+                canonical_jobs = [item for item in jobs if item.get("dedup_status", "CANONICAL") != "DUPLICATE"]
+                canonical_jobs = canonical_jobs[:JOB_CORRELATION_MAX_JOBS_PER_COMPANY]
+                for job in canonical_jobs:
+                    try:
+                        metrics["jobs_evaluated"] += 1
+                        result = await _correlate_and_enrich_job(job, company["careers_url"])
+                        correlation = result["correlation"]
+                        if correlation == "EXACT_JOB_MATCH":
+                            metrics["exact_matches"] += 1
+                            event("OFFICIAL_JOB_FOUND", job_id=job["id"], correlation=correlation)
+                        elif correlation == "HIGH_CONFIDENCE_MATCH":
+                            metrics["high_confidence_matches"] += 1
+                            event("OFFICIAL_JOB_FOUND", job_id=job["id"], correlation=correlation)
+                        elif correlation == "AMBIGUOUS":
+                            metrics["ambiguous"] += 1
+                            event("OFFICIAL_JOB_AMBIGUOUS", job_id=job["id"])
+                        else:
+                            metrics["not_found"] += 1
+                            event("OFFICIAL_JOB_NOT_FOUND", job_id=job["id"], correlation=correlation)
+                        if result["status"] == "ACTIVE":
+                            metrics["active"] += 1
+                        elif result["status"] == "CLOSED":
+                            metrics["closed"] += 1
+                        event("JOB_STATUS_RESOLVED", job_id=job["id"], status=result["status"])
+                        if result["enriched"]:
+                            metrics["work_model_resolved"] += 1
+                            await asyncio.to_thread(_calculate_job_score, job["id"])
+                            eval_result = await asyncio.to_thread(
+                                _evaluate_job_opportunity, job["id"], "job_correlation_scheduler")
+                            opportunity_id = eval_result.get("opportunity_id")
+                            if opportunity_id and eval_result.get("decision") in _ACTIONABLE_JOB_DECISIONS:
+                                await asyncio.to_thread(_discover_opportunity_channels, opportunity_id)
+                                metrics["official_channels_found"] += 1
+                                await asyncio.to_thread(_create_opportunity_action_plan, opportunity_id)
+                                event("JOB_CHANNEL_IMPROVED", job_id=job["id"])
+                    except Exception as job_error:
+                        metrics["failed"] += 1
+                        event("JOB_CORRELATION_ITEM_FAILED", job_id=job.get("id"), error=type(job_error).__name__)
+            except Exception as company_error:
+                metrics["failed"] += 1
+                event("JOB_CORRELATION_COMPANY_FAILED", company_id=company.get("id"),
+                      error=type(company_error).__name__)
+        metrics["duration_ms"] = int((datetime.now(UTC) - started).total_seconds() * 1000)
+        event("JOB_CORRELATION_COMPLETED", **metrics)
+        return metrics
+    except Exception as exc:
+        metrics["failed"] += 1
+        metrics["duration_ms"] = int((datetime.now(UTC) - started).total_seconds() * 1000)
+        event("JOB_CORRELATION_FAILED", error=type(exc).__name__, **metrics)
+        return metrics
+
+
+async def job_correlation_scheduler() -> None:
+    """1x/dia, as 5h30 - depois de Company Intelligence (5h, para que
+    domain/careers_url recem-descobertos ja estejam disponiveis) e antes
+    de market_scan (6h)."""
+    last_slot = ""
+    while True:
+        now = datetime.now().astimezone()
+        slot = now.date().isoformat()
+        if now.hour == 5 and now.minute >= 30 and slot != last_slot:
+            last_slot = slot
+            try:
+                await job_correlation_cycle()
+            except Exception as exc:
+                event("JOB_CORRELATION_FAILED", error=type(exc).__name__)
         await asyncio.sleep(60)
 
 
