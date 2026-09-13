@@ -211,6 +211,55 @@ def test_traditional_pipeline_scheduler_is_untouched_by_opportunity_assembly() -
     assert "/api/v1/jobs/" not in body or "evaluate" not in body
 
 
+def test_opportunity_assembly_cycle_tracks_channel_observability_metrics() -> None:
+    # Fase 2, Prompt 9, Secao 22: "channels_resolved" so significa "a rota
+    # foi chamada" - nunca "achou canal seguro". Estas metricas separadas
+    # evitam a leitura enganosa apontada pelo prompt.
+    body = _function_body(_main_source(), "opportunity_assembly_cycle")
+    for metric in ("channels_discovered", "channels_verified", "ats_channels", "email_channels",
+                   "careers_channels", "talent_pool_channels", "captcha_fallbacks_avoided",
+                   "auth_fallbacks_avoided", "no_channel"):
+        assert f'"{metric}"' in body, f"missing channel metric {metric}"
+
+
+def test_assemble_job_opportunity_emits_channel_discovery_lifecycle_events() -> None:
+    body = _function_body(_main_source(), "_assemble_job_opportunity")
+    assert 'event("CHANNEL_DISCOVERY_STARTED"' in body
+    assert 'event("CHANNEL_DISCOVERY_COMPLETED"' in body
+    assert "_record_channel_metrics(" in body
+    assert "_record_fallback_avoidance_metrics(" in body
+
+
+def test_record_channel_metrics_counts_no_channel_when_candidates_empty() -> None:
+    body = _sync_function_body(_main_source(), "_record_channel_metrics")
+    assert 'metrics["no_channel"] += 1' in body
+    assert "if not candidates:" in body
+
+
+def test_record_channel_metrics_distinguishes_verified_from_unusable() -> None:
+    body = _sync_function_body(_main_source(), "_record_channel_metrics")
+    assert 'event("CHANNEL_VERIFIED"' in body
+    assert 'event("CHANNEL_UNUSABLE"' in body
+    assert 'candidate.get("status") == "VERIFIED"' in body
+
+
+def test_record_fallback_avoidance_only_counts_when_alternative_actually_selected() -> None:
+    # Prova real de que um canal CAPTCHA/AUTH tambem presente nao bloqueou
+    # a escolha de um canal VERIFIED_AVAILABLE (Secao 12).
+    body = _sync_function_body(_main_source(), "_record_fallback_avoidance_metrics")
+    assert 'channel_trust == "VERIFIED_AVAILABLE"' in body
+    assert "had_captcha and selected_alternative" in body
+    assert "had_auth and selected_alternative" in body
+
+
+def test_channel_metrics_helpers_never_call_a_send_or_submit_function() -> None:
+    source = _main_source()
+    for name in ("_record_channel_metrics", "_record_fallback_avoidance_metrics"):
+        body = _sync_function_body(source, name)
+        for forbidden in ("send_application_email(", "send_security_code(", "urlopen(", "submit"):
+            assert forbidden not in body, f"{name} must never call {forbidden}"
+
+
 def test_metrics_exposes_gmail_health_and_opportunity_assembly_health() -> None:
     source = _main_source()
     start = source.index('@app.get("/metrics")')

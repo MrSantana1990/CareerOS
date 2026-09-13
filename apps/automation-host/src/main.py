@@ -2445,6 +2445,54 @@ def _create_opportunity_action_plan(opportunity_id: str) -> dict:
 
 
 _ACTIONABLE_JOB_DECISIONS = {"PREPARE", "ACTIONABLE", "HUMAN_REQUIRED"}
+_ATS_LIKE_TYPES = {"OFFICIAL_ATS"}
+_EMAIL_LIKE_TYPES = {"OFFICIAL_EMAIL", "RECRUITER_INSTRUCTION"}
+_CAPTCHA_AUTH_TYPES = {"requires_captcha", "requires_auth"}
+
+
+def _record_channel_metrics(candidates: list[dict], metrics: dict) -> None:
+    """Fase 2, Prompt 9, Secao 22 - metricas honestas de canal: discovery !=
+    verified != usable. Nunca conta "channels_resolved" (a rota foi chamada)
+    como se fosse "achou canal seguro" - essa era exatamente a metrica
+    enganosa apontada pelo prompt."""
+    if not candidates:
+        metrics["no_channel"] += 1
+        return
+    metrics["channels_discovered"] += len(candidates)
+    for candidate in candidates:
+        event("CHANNEL_CANDIDATE_FOUND", type=candidate.get("type"), status=candidate.get("status"))
+        if candidate.get("status") == "VERIFIED":
+            metrics["channels_verified"] += 1
+            event("CHANNEL_VERIFIED", type=candidate.get("type"))
+        else:
+            event("CHANNEL_UNUSABLE", type=candidate.get("type"),
+                  email_trust=(candidate.get("evidence") or {}).get("email_trust"))
+        channel_type = candidate.get("type")
+        if channel_type in _ATS_LIKE_TYPES:
+            metrics["ats_channels"] += 1
+        elif channel_type in _EMAIL_LIKE_TYPES:
+            metrics["email_channels"] += 1
+        elif channel_type == "OFFICIAL_CAREERS":
+            metrics["careers_channels"] += 1
+        elif channel_type == "TALENT_POOL":
+            metrics["talent_pool_channels"] += 1
+
+
+def _record_fallback_avoidance_metrics(candidates: list[dict], plan_result: dict, metrics: dict) -> None:
+    """CAPTCHA/AUTH_FALLBACKS_AVOIDED (Secao 12/22): conta quando um canal
+    CAPTCHA/AUTH tambem estava presente, mas o Action Plan terminou usando
+    um canal VERIFIED_AVAILABLE mesmo assim - prova de que a correcao de
+    _aggregate_channel_trust (career.py) realmente evitou o fallback ruim."""
+    had_captcha = any(item.get("requires_captcha") for item in candidates)
+    had_auth = any(item.get("requires_auth") for item in candidates)
+    channel_trust = ((plan_result.get("plan") or {}).get("evidence") or {}).get("channel_trust")
+    selected_alternative = channel_trust == "VERIFIED_AVAILABLE"
+    if selected_alternative:
+        event("CHANNEL_ALTERNATIVE_SELECTED", channel=(plan_result.get("plan") or {}).get("channel"))
+    if had_captcha and selected_alternative:
+        metrics["captcha_fallbacks_avoided"] += 1
+    if had_auth and selected_alternative:
+        metrics["auth_fallbacks_avoided"] += 1
 
 
 async def _assemble_job_opportunity(job: dict, metrics: dict) -> None:
@@ -2460,10 +2508,15 @@ async def _assemble_job_opportunity(job: dict, metrics: dict) -> None:
         if decision == "HUMAN_REQUIRED":
             metrics["human_required"] += 1
         if opportunity_id and decision in _ACTIONABLE_JOB_DECISIONS:
-            await asyncio.to_thread(_discover_opportunity_channels, opportunity_id)
+            event("CHANNEL_DISCOVERY_STARTED", opportunity_id=opportunity_id)
+            channels_result = await asyncio.to_thread(_discover_opportunity_channels, opportunity_id)
             metrics["channels_resolved"] += 1
-            await asyncio.to_thread(_create_opportunity_action_plan, opportunity_id)
+            _record_channel_metrics(channels_result.get("candidates") or [], metrics)
+            plan_result = await asyncio.to_thread(_create_opportunity_action_plan, opportunity_id)
             metrics["action_plans_created"] += 1
+            _record_fallback_avoidance_metrics(channels_result.get("candidates") or [], plan_result, metrics)
+            event("CHANNEL_DISCOVERY_COMPLETED", opportunity_id=opportunity_id,
+                  candidates=len(channels_result.get("candidates") or []))
         event("OPPORTUNITY_ASSEMBLY_JOB_EVALUATED", job_id=job.get("id"), decision=decision,
               created=bool(result.get("created")))
     except Exception as exc:
@@ -2506,7 +2559,14 @@ async def opportunity_assembly_cycle() -> dict:
     started = datetime.now(UTC)
     event("OPPORTUNITY_ASSEMBLY_STARTED")
     metrics = {"items_found": 0, "items_processed": 0, "opportunities_created": 0,
-               "channels_resolved": 0, "action_plans_created": 0, "human_required": 0, "failed": 0}
+               "channels_resolved": 0, "action_plans_created": 0, "human_required": 0, "failed": 0,
+               # Fase 2, Prompt 9, Secao 22 - observabilidade de canal
+               # separada de "channels_resolved" (que so significa "a rota
+               # foi chamada", nunca "achou um canal seguro" - metrica
+               # enganosa apontada pelo proprio Prompt 9).
+               "channels_discovered": 0, "channels_verified": 0, "ats_channels": 0, "email_channels": 0,
+               "careers_channels": 0, "talent_pool_channels": 0, "captcha_fallbacks_avoided": 0,
+               "auth_fallbacks_avoided": 0, "no_channel": 0}
     health = load_json(OPPORTUNITY_ASSEMBLY_HEALTH, {"consecutive_failures": 0})
     try:
         pending_jobs = await asyncio.to_thread(_fetch_pending_jobs)

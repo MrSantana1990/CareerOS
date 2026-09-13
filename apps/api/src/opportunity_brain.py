@@ -411,7 +411,13 @@ def evaluate_job_opportunity(*, job: dict, profile: dict, candidate_skills: list
 
     channels = channels or []
     has_verified_channel = any(item.get("status") == "VERIFIED" for item in channels)
-    needs_human_channel = any(item.get("requires_human") or item.get("requires_captcha") for item in channels)
+    # Fase 2, Prompt 9, Secao 12: mesmo principio de _aggregate_channel_trust
+    # (career.py) aplicado aqui - um canal VERIFIED ja disponivel nao pode
+    # ser "envenenado" pela mera presenca de outra linha de canal antiga/
+    # ruim (requires_human/requires_captcha) para a mesma Opportunity.
+    needs_human_channel = (not has_verified_channel) and any(
+        item.get("requires_human") or item.get("requires_captcha") for item in channels
+    )
     if needs_human_channel:
         return BrainDecision(decision="HUMAN_REQUIRED", eligibility="PASS", fit_score=score_result.total,
                               confidence=75, reasons=reasons + ["channel_requires_human"],
