@@ -941,7 +941,7 @@ async def list_companies(limit: int = 100, slug: str = Depends(require_admin)) -
     org_id = await organization_id(slug)
     query = text("""
         SELECT id, name, domain, careers_url, ats_type, official_recruiting_email,
-               talent_pool_url, br_presence, last_checked_at
+               talent_pool_url, br_presence, last_checked_at, evidence
         FROM companies WHERE organization_id=:organization_id AND deleted_at IS NULL
         ORDER BY name LIMIT :limit
     """)
