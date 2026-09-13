@@ -4,7 +4,7 @@ COPY pyproject.toml .
 RUN pip install --no-cache-dir .
 RUN playwright install --with-deps chromium
 RUN playwright install --with-deps chrome
-RUN apt-get update && apt-get install -y --no-install-recommends xvfb && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb libzbar0 && rm -rf /var/lib/apt/lists/*
 COPY src src
 ENV CAREER_RUNTIME=/data/runtime
 CMD rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 && Xvfb :99 -screen 0 1440x900x24 -nolisten tcp & sleep 1 && DISPLAY=:99 exec uvicorn src.main:app --host 0.0.0.0 --port 8765
