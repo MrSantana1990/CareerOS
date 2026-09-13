@@ -3,6 +3,7 @@ Nenhuma dependencia externa viva (Secao 21: "No live external dependency in
 CI") - probe_careers_candidate recebe um `fetch` falso injetado."""
 
 from src.career import _aggregate_channel_trust
+from src.channel_discovery import discover_job_channel_candidates
 from src.channel_verification import (
     classify_email_trust, is_email_trust_usable, probe_careers_candidate, verify_channel_candidate,
 )
@@ -279,6 +280,30 @@ def test_brain_no_verified_channel_and_human_required_flag_still_requires_human(
         structured_extraction=None, channels=channels, already_terminal=False,
     )
     assert decision.decision == "HUMAN_REQUIRED"
+
+
+# Real regression found during production validation of this prompt: the
+# candidate built by channel_discovery.py carried no `evidence` at all, so
+# classify_email_trust had nothing to classify against and every explicit
+# job-posting email silently fell through to UNVERIFIED. -------------------
+
+def test_real_zeleno_meds_case_explicit_email_is_discovered_with_evidence_and_verified():
+    job = {"canonical_url": "https://www.linkedin.com/jobs/view/4459952895/", "source": "linkedin"}
+    structured = {
+        "application_instructions": {
+            "value": {"recruiting_email": "giovanna.marinho@zelenomeds.com", "subject": None},
+            "confidence": 85, "source_url": job["canonical_url"],
+            "evidence_snippet": "Se candidate pelo Linkedin ou envie seu curriculo em meu email: "
+                                 "giovanna.marinho@zelenomeds.com",
+            "extraction_method": "detect_email_application",
+        }
+    }
+    candidates = discover_job_channel_candidates(job, {}, structured)
+    email_candidate = next(c for c in candidates if c["type"] == "OFFICIAL_EMAIL")
+    assert email_candidate["evidence"]["extraction_method"] == "detect_email_application"
+    verified = verify_channel_candidate(email_candidate, company=None)
+    assert verified["status"] == "VERIFIED"
+    assert verified["evidence"]["email_trust"] == "EXPLICIT_IN_JOB_POSTING"
 
 
 # Wiring: discover_channels route calls verify_channel_candidate and persists
