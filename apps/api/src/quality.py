@@ -71,6 +71,163 @@ def _overlap(required: list[str], verified: list[str], weight: int) -> tuple[int
     return score, sorted(matched), sorted(wanted - known)
 
 
+# ---------------------------------------------------------------------------
+# Fase 2, Prompt 10 - STRUCTURED EXTRACTION INTELLIGENCE
+#
+# score_job() nunca lia job.get("structured_extraction") - so as colunas
+# planas legadas (required_skills/seniority/work_model/language_requirements/
+# salary_min), quase sempre vazias para vagas descobertas pelo Prompt 3/4
+# (achado real do Pilot: 96 Jobs reais -> so 3 valores de score distintos,
+# porque toda vaga sem coluna plana cai nos MESMOS valores fixos default
+# abaixo). Os resolvers abaixo usam structured_extraction como FALLBACK
+# (nunca substituindo um dado plano ja confiavel) - e so quando a propria
+# evidencia nao parece contaminada (Secao 3: TRUSTED/USABLE_WITH_CAUTION/
+# LOW_CONFIDENCE/UNKNOWN).
+# ---------------------------------------------------------------------------
+
+# Familias transferiveis (Fase 2, Prompt 4) - movidas para ca (from
+# opportunity_brain.py, que agora importa daqui) para servirem tambem como
+# vocabulario de tecnologias RECONHECIDAS por score_job, sem duplicar a
+# lista em dois modulos (Secao 7: "reusar familias ja definidas"). Kubernetes
+# e Docker tem familia vazia de proposito - nao existe aresta de
+# transferencia Docker->Kubernetes (Secao 6/7, exemplo literal do usuario).
+SKILL_FAMILIES: dict[str, set[str]] = {
+    "sql server": {"oracle", "postgresql", "mysql", "sql"},
+    "oracle": {"sql server", "postgresql", "mysql", "sql"},
+    "postgresql": {"sql server", "oracle", "mysql", "sql"},
+    "mysql": {"sql server", "oracle", "postgresql", "sql"},
+    "aws": {"azure", "gcp", "google cloud"},
+    "azure": {"aws", "gcp", "google cloud"},
+    "gcp": {"aws", "azure", "google cloud"},
+    "google cloud": {"aws", "azure", "gcp"},
+    "kubernetes": set(),
+    "docker": set(),
+    # Prompt 10, Secao 7 - familias adicionais pedidas explicitamente,
+    # conservadoras (so tecnologias realmente correlatas/intercambiaveis):
+    "prometheus": {"grafana", "datadog", "new relic"},
+    "grafana": {"prometheus", "datadog", "new relic"},
+    "datadog": {"prometheus", "grafana", "new relic"},
+    "new relic": {"prometheus", "grafana", "datadog"},
+    "rest api": {"graphql", "soap"},
+    "graphql": {"rest api"},
+    "soap": {"rest api"},
+    "power bi": {"tableau", "looker", "qlik"},
+    "tableau": {"power bi", "looker", "qlik"},
+    "looker": {"power bi", "tableau", "qlik"},
+    "qlik": {"power bi", "tableau", "looker"},
+}
+
+# Marcadores reais de contaminacao de UI/sidebar do LinkedIn (Secao 1/3 -
+# achado real de producao: o caso Zeleno Meds tinha work_model="HYBRID" e
+# location="Campinas" extraidos de uma vaga de OUTRA empresa - "Fitcard" -
+# listada na barra lateral "vagas similares", nao do conteudo real da
+# vaga). Nunca inferido - so marca como NAO CONFIAVEL quando o proprio
+# evidence_snippet contem chrome de UI conhecido do LinkedIn.
+_LINKEDIN_UI_NOISE_MARKERS = (
+    "exibir tudo", "ex-alunos da instituicao", "candidatura simplificada",
+    "veja como voce se compara", "ative um alerta", "reative premium",
+    "status da candidatura", "candidatura enviada", "ver curriculo",
+)
+
+
+def is_structured_field_trustworthy(field: dict | None) -> bool:
+    """Secao 3 - TRUSTED/USABLE_WITH_CAUTION/LOW_CONFIDENCE/UNKNOWN,
+    simplificado para um booleano de uso pratico aqui: um campo com
+    evidence_snippet reconhecivel como chrome de UI (nao o conteudo real
+    da vaga) nunca e tratado como fato, mesmo com confidence alta."""
+    if not field:
+        return False
+    snippet = normalize(str(field.get("evidence_snippet") or ""))
+    return not any(marker in snippet for marker in _LINKEDIN_UI_NOISE_MARKERS)
+
+
+_SENIORITY_TITLE_MARKERS = (
+    ("especialista", "SPECIALIST"), ("specialist", "SPECIALIST"),
+    ("senior", "SENIOR"), ("sênior", "SENIOR"), ("sr.", "SENIOR"),
+    ("pleno", "PLENO"), ("pl.", "PLENO"),
+    ("junior", "JUNIOR"), ("júnior", "JUNIOR"), ("jr.", "JUNIOR"),
+    ("lead", "LEAD"), ("líder técnico", "LEAD"),
+    ("manager", "MANAGER"), ("gerente", "MANAGER"),
+)
+
+
+def extract_seniority_from_title(title: str | None) -> str | None:
+    """Secao 9 - extrai seniority so quando o proprio titulo da vaga
+    literalmente contem a palavra (nunca infere pela remuneracao/trajetoria
+    do candidato aqui - isso e Career Fit, uma comparacao separada)."""
+    text = normalize(str(title or ""))
+    if not text:
+        return None
+    for marker, label in _SENIORITY_TITLE_MARKERS:
+        if normalize(marker) in text:
+            return label
+    return None
+
+
+def _requirement_sentences(structured_extraction: dict | None) -> list[str]:
+    extraction = structured_extraction or {}
+    sentences = list((extraction.get("mandatory_requirements") or {}).get("value") or [])
+    sentences += list((extraction.get("preferred_requirements") or {}).get("value") or [])
+    return [str(item) for item in sentences]
+
+
+def resolve_required_technology_tokens(structured_extraction: dict | None) -> list[str]:
+    """Fallback do dimension 'technology' quando job.required_skills (coluna
+    plana) esta vazio (Secao 2/4). Reconhece SOMENTE tokens do vocabulario
+    de SKILL_FAMILIES literalmente mencionados nas sentencas reais de
+    mandatory/preferred_requirements - nunca promove um requisito que a
+    vaga nao menciona, nunca infere tecnologia a partir do titulo/familia
+    do job."""
+    text = normalize(" ".join(_requirement_sentences(structured_extraction)))
+    if not text:
+        return []
+    return [token for token in SKILL_FAMILIES if token in text]
+
+
+def resolve_structured_work_model(structured_extraction: dict | None) -> str | None:
+    """Fallback quando job.work_model (coluna plana) esta vazio (Secao 11).
+    Nunca usa um campo contaminado por UI/sidebar (Secao 3)."""
+    field = (structured_extraction or {}).get("work_model")
+    if not is_structured_field_trustworthy(field):
+        return None
+    value = (field or {}).get("value") or {}
+    work_model = value.get("work_model")
+    return str(work_model) if work_model and str(work_model).upper() != "UNKNOWN" else None
+
+
+def resolve_structured_salary(structured_extraction: dict | None) -> float | None:
+    """Fallback quando job.salary_min (coluna plana) esta ausente (Secao
+    10). Nunca inventa conversao anual/mensal sem unidade clara - so aceita
+    o valor minimo ja resolvido pela extracao (hard_blocks.extract_salary_brl,
+    reusado por structured_fields.py, nunca reimplementado aqui)."""
+    field = (structured_extraction or {}).get("salary")
+    if not field or not is_structured_field_trustworthy(field):
+        return None
+    value = (field or {}).get("value") or {}
+    salary_min = value.get("salary_min") or value.get("min")
+    try:
+        return float(salary_min) if salary_min else None
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_structured_language_requirements(structured_extraction: dict | None) -> list[dict]:
+    """Fallback quando job.language_requirements (coluna plana, lista de
+    {language,required,level}) esta vazia (Secao 8). structured_extraction
+    so guarda UM idioma explicito por vaga (nunca infere pela lingua da
+    propria pagina) - mapeado para o mesmo formato piano para reusar a
+    logica de risco/bloqueio ja existente em score_job, sem duplicar."""
+    field = (structured_extraction or {}).get("language_requirements")
+    if not field or not is_structured_field_trustworthy(field):
+        return []
+    value = (field or {}).get("value") or {}
+    language = value.get("language")
+    level = value.get("level")
+    if not language or not level:
+        return []
+    return [{"language": language, "level": level, "required": True}]
+
+
 def match_radars(job: dict, radars: list[dict]) -> list[str]:
     """Retorna os códigos dos radares HABILITADOS cujos roles/keywords têm
     sobreposição com o título/descrição da vaga - primeira ligação real entre
@@ -93,7 +250,8 @@ def score_job(job: dict, profile: dict, enabled_rules: set[str] | None = None) -
     text = normalize(" ".join(str(job.get(key) or "") for key in ("title", "description", "location")))
     source = normalize(str(job.get("source") or ""))
     domain = normalize(urlparse(str(job.get("canonical_url") or job.get("source_url") or "")).netloc)
-    languages = job.get("language_requirements") or []
+    structured_extraction = job.get("structured_extraction")
+    languages = job.get("language_requirements") or resolve_structured_language_requirements(structured_extraction)
     blocks: list[str] = []
     risks: list[str] = []
     if "GUPY_BLOCK" in enabled and (source == "gupy" or "gupy io" in domain):
@@ -105,16 +263,24 @@ def score_job(job: dict, profile: dict, enabled_rules: set[str] | None = None) -
     if "RELOCATION_REQUIRED" in enabled and "relocation" in text and "required" in text:
         blocks.append("RELOCATION_REQUIRED")
 
-    technical, strengths, gaps = _overlap(job.get("required_skills") or [], profile.get("verified_skills") or [], 30)
+    # Fase 2, Prompt 10, Secao 2/4: required_skills (coluna plana) so cai
+    # para structured_extraction quando esta genuinamente vazia - nunca
+    # substitui um dado plano ja confiavel. known_skills soma verified +
+    # evidence-backed (Secao 5) - Score V2 e um sinal numerico grosseiro; a
+    # distincao fina de confianca por skill continua no Brain
+    # (find_skill_evidence/_skill_confidence), nao duplicada aqui.
+    required_skills = job.get("required_skills") or resolve_required_technology_tokens(structured_extraction)
+    known_skills = list(profile.get("verified_skills") or []) + list(profile.get("evidence_backed_skills") or [])
+    technical, strengths, gaps = _overlap(required_skills, known_skills, 30)
     target_roles = [normalize(item) for item in profile.get("target_roles") or []]
     title = normalize(str(job.get("title") or ""))
     experience = 20 if any(role and (role in title or title in role) for role in target_roles) else 8
-    seniority = normalize(str(job.get("seniority") or ""))
+    seniority = normalize(str(job.get("seniority") or "") or extract_seniority_from_title(job.get("title")) or "")
     seniority_score = 10 if seniority in {"senior", "specialist", "especialista"} else 7 if seniority else 5
-    work_model = normalize(str(job.get("work_model") or ""))
+    work_model = normalize(str(job.get("work_model") or "") or resolve_structured_work_model(structured_extraction) or "")
     desired_models = {normalize(item) for item in profile.get("work_models") or []}
     work_score = 10 if work_model in desired_models else 6 if not work_model else 0
-    salary_min = float(job.get("salary_min") or 0)
+    salary_min = float(job.get("salary_min") or resolve_structured_salary(structured_extraction) or 0)
     if "SUPPORT_N1_MINIMUM" in enabled and normalize(str(job.get("family") or "")) == "support" and seniority in {"n1", "junior"} and salary_min and salary_min < 4000:
         blocks.append("SUPPORT_N1_MINIMUM")
     if "MINIMUM_SALARY_BLOCK" in enabled and salary_min and salary_min < MINIMUM_ACCEPTABLE_SALARY_BRL:

@@ -219,7 +219,7 @@ def test_o_material_language_unknown_requires_human():
     decision = evaluate_job_opportunity(job={}, profile=PROFILE, candidate_skills=SKILLS,
                                          score_result=_score(), structured_extraction=structured)
     assert decision.decision == "HUMAN_REQUIRED"
-    assert "language_level_unknown" in decision.unknowns
+    assert "MISSING_LANGUAGE_EVIDENCE" in decision.unknowns
 
 
 def test_o_watch_recheck_no_new_evidence_stays_watch():

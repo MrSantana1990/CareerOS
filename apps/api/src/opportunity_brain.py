@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import re
 
-from .quality import ScoreResult, normalize
+from .quality import SKILL_FAMILIES, ScoreResult, is_structured_field_trustworthy, normalize
 
 BRAIN_VERSION = "1.0"
 
@@ -166,6 +166,27 @@ _SKILL_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
+# Fase 2, Prompt 10, Secao 12: education/experience/certification exigidos
+# EXPLICITAMENTE, sem nenhuma tecnologia nomeada na mesma sentenca (ver
+# _mentions_known_technology abaixo), nao tem como ser comparado com skill
+# matching - candidate_profiles nao tem coluna real de anos/educacao/
+# certificacao (action_engine.classify_profile_completeness ja trata isso
+# como estruturalmente MISSING). Isso e MATERIAL_UNKNOWN, nunca
+# CORE_REQUIREMENT_MISSING automatico (Secao 12: "unknown != mismatch").
+# Quando a MESMA sentenca tambem nomeia uma tecnologia real (ex.: "5 anos
+# de experiencia com Kubernetes"), o requisito tecnico concreto continua
+# valendo como CORE_REQUIREMENT normal (Teste A, Prompt 10).
+_EXPERIENCE_YEARS_MARKERS = re.compile(r"anos? de experi[eê]ncia|years? of experience", re.IGNORECASE)
+_EDUCATION_MARKERS = re.compile(
+    r"\bdegree\b|\bdiploma\b|gradua[çc][ãa]o|ensino superior|\bbachelor\b|p[oó]s-gradua[çc][ãa]o",
+    re.IGNORECASE,
+)
+_CERTIFICATION_MARKERS = re.compile(r"certifica[çc][aã]o|certification|\bcertified\b", re.IGNORECASE)
+
+
+def _mentions_known_technology(text_norm: str) -> bool:
+    return any(token in text_norm for token in SKILL_FAMILIES)
+
 
 def classify_requirement_domain(evidence_snippet: str) -> str:
     text = evidence_snippet or ""
@@ -182,26 +203,25 @@ def classify_requirement_domain(evidence_snippet: str) -> str:
 # Secao 7 - TRANSFERABLE SKILL MODEL
 # ---------------------------------------------------------------------------
 
-# Familias deterministicas e auditaveis - transferencia aumenta o fit, nunca
-# fabrica a habilidade ausente. Kubernetes tem familia vazia de proposito:
-# "Docker only" NAO significa "has Kubernetes" (Secao 7, exemplo literal do
-# usuario) - nao existe aresta de transferencia Docker->Kubernetes aqui.
-_SKILL_FAMILIES: dict[str, set[str]] = {
-    "sql server": {"oracle", "postgresql", "mysql", "sql"},
-    "oracle": {"sql server", "postgresql", "mysql", "sql"},
-    "postgresql": {"sql server", "oracle", "mysql", "sql"},
-    "mysql": {"sql server", "oracle", "postgresql", "sql"},
-    "aws": {"azure", "gcp", "google cloud"},
-    "azure": {"aws", "gcp", "google cloud"},
-    "gcp": {"aws", "azure", "google cloud"},
-    "google cloud": {"aws", "azure", "gcp"},
-    "kubernetes": set(),
-    "docker": set(),
-}
+# Fase 2, Prompt 10: a familia de skills transferiveis agora mora em
+# quality.py (SKILL_FAMILIES) - score_job() tambem precisa desse mesmo
+# vocabulario (para reconhecer tecnologias mencionadas quando
+# required_skills, a coluna plana, esta vazia) e importar dali evita ter
+# duas listas divergentes (Secao 21: "Nao duplicar regras"). Kubernetes
+# continua com familia vazia de proposito: "Docker only" NAO significa
+# "has Kubernetes" (Secao 7, exemplo literal do usuario).
 
 
 def _skill_confidence(skill_row: dict) -> int:
-    return 90 if skill_row.get("verified") else 55
+    """Fase 2, Prompt 10, Secao 5: VERIFIED (90) > EVIDENCE_BACKED (65,
+    skill_evidence real - ex.: mencionado no curriculo aprovado) >
+    DECLARED (55, so o nome persistido, sem prova) - nunca inventa
+    evidencia; ausencia de evidence_count = DECLARED, nao promovido."""
+    if skill_row.get("verified"):
+        return 90
+    if (skill_row.get("evidence_count") or 0) > 0:
+        return 65
+    return 55
 
 
 def find_skill_evidence(requirement_text: str, candidate_skills: list[dict]) -> dict | None:
@@ -213,7 +233,7 @@ def find_skill_evidence(requirement_text: str, candidate_skills: list[dict]) -> 
         if name_norm and name_norm in text_norm:
             return {"match_type": "direct", "skill": skill_row["name"],
                     "confidence": _skill_confidence(skill_row)}
-    for canonical, family in _SKILL_FAMILIES.items():
+    for canonical, family in SKILL_FAMILIES.items():
         if canonical in text_norm:
             for member in family:
                 if member in by_name:
@@ -246,8 +266,35 @@ def evaluate_requirements(structured_extraction: dict | None, candidate_skills: 
         if domain == "CONTEXTUAL_REQUIREMENT":
             contextual.append(item)
             continue
+        # Fase 2, Prompt 10, Secao 12: education/experience/certification
+        # exigidos SEM nenhuma tecnologia nomeada na mesma sentenca nao tem
+        # como ser comparado com skill matching - candidate_profiles nao
+        # tem coluna real de anos/educacao/certificacao (estruturalmente
+        # MISSING, action_engine.classify_profile_completeness). Isso e
+        # checado ANTES do domain (mesmo uma sentenca que _SKILL_MARKERS
+        # nao reconheceu, ex.: "ensino superior completo" em portugues, cai
+        # aqui) - MATERIAL_UNKNOWN, nunca BLOCK automatico nem
+        # "requisito desconhecido" generico. Quando a MESMA sentenca
+        # tambem nomeia uma tecnologia real (ex.: "5 anos de experiencia
+        # com Kubernetes"), o requisito tecnico concreto continua valendo
+        # (Teste A/M do Prompt 10 - nunca vira MATERIAL_UNKNOWN so por
+        # causa da clausula de anos).
+        if not _mentions_known_technology(normalize(item)):
+            if _EXPERIENCE_YEARS_MARKERS.search(item):
+                uncertain.append(f"MISSING_EXPERIENCE_EVIDENCE:{item[:80]}")
+                continue
+            if _EDUCATION_MARKERS.search(item):
+                uncertain.append(f"MISSING_EDUCATION_EVIDENCE:{item[:80]}")
+                continue
+            if _CERTIFICATION_MARKERS.search(item):
+                uncertain.append(f"MISSING_EDUCATION_EVIDENCE:{item[:80]}")
+                continue
         if domain == "UNCERTAIN_REQUIREMENT":
-            uncertain.append(item)
+            # Razao especifica, nunca o snippet bruto sozinho como se
+            # fosse auto-explicativo (achado real: extracao do LinkedIn as
+            # vezes so captura o marcador de secao "Requisitos", sem
+            # nenhum conteudo real - caso real Zeleno Meds).
+            uncertain.append(f"UNKNOWN_REQUIREMENT_CLASSIFICATION:{item[:80]}")
             continue
         evidence = find_skill_evidence(item, candidate_skills)
         if evidence is None:
@@ -306,14 +353,22 @@ def evaluate_language_gap(structured_extraction: dict | None, candidate_language
 
 def evaluate_location_work_model(structured_extraction: dict | None, job: dict, profile: dict) -> dict:
     """Nunca 'Sao Paulo = BLOCK'. UNKNOWN nao presume Remote. Hibrido
-    viavel segue; onsite distante sem indicio de relocation pode bloquear."""
+    viavel segue; onsite distante sem indicio de relocation pode bloquear.
+
+    Fase 2, Prompt 10, Secao 3: achado real de producao (caso Zeleno Meds) -
+    work_model/location extraidos do LinkedIn as vezes vem do chrome de UI/
+    sidebar ("vagas similares" de OUTRA empresa), nao do conteudo real da
+    vaga. is_structured_field_trustworthy (quality.py) descarta esses casos
+    (nunca os trata como fato) antes de qualquer decisao aqui."""
     extraction = structured_extraction or {}
     work_model_field = extraction.get("work_model") or {}
-    work_model = str((work_model_field.get("value") or {}).get("work_model")
-                     or job.get("work_model") or "UNKNOWN").upper()
+    trusted_work_model = (work_model_field.get("value") or {}).get("work_model") \
+        if is_structured_field_trustworthy(work_model_field) else None
+    work_model = str(trusted_work_model or job.get("work_model") or "UNKNOWN").upper()
     desired_models = {str(item).upper() for item in (profile.get("work_models") or [])}
     location_field = extraction.get("location") or {}
-    region = (location_field.get("value") or {}).get("region")
+    region = ((location_field.get("value") or {}).get("region")
+              if is_structured_field_trustworthy(location_field) else None)
     candidate_city = profile.get("city")
     same_region = bool(region and candidate_city and normalize(str(region)) == normalize(str(candidate_city)))
 
@@ -383,7 +438,9 @@ def evaluate_job_opportunity(*, job: dict, profile: dict, candidate_skills: list
     if location_eval["status"] == "COMMUTE_BLOCK":
         unknowns.append("hybrid_commute_out_of_region")
     if location_eval["status"] == "UNKNOWN":
-        unknowns.append("work_model_or_location_unknown")
+        # Fase 2, Prompt 10, Secao 15: razao especifica em vez de
+        # MATERIAL_UNKNOWN generico.
+        unknowns.append("UNKNOWN_WORK_MODEL")
 
     language_eval = evaluate_language_gap(structured_extraction, profile.get("language_levels"))
     if language_eval["status"] == "GAP":
@@ -391,7 +448,7 @@ def evaluate_job_opportunity(*, job: dict, profile: dict, candidate_skills: list
                               confidence=85, reasons=[f"language_gap:{language_eval.get('language')}"],
                               hard_blocks=["LANGUAGE_GAP"])
     if language_eval["status"] == "UNKNOWN" and language_eval.get("material"):
-        unknowns.append("language_level_unknown")
+        unknowns.append("MISSING_LANGUAGE_EVIDENCE")
 
     reasons = list(score_result.strengths)
     reasons.extend(f"transferable:{item['skill']}" for item in req_eval["transferable_matches"])
