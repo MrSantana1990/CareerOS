@@ -10,7 +10,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import quote_plus, urljoin, urlparse, urlsplit
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +18,10 @@ from playwright.async_api import BrowserContext, Frame, Page, Playwright, async_
 
 from .anti_spam import remaining_daily_quota
 from .ats_detection import ATSMatch, detect_ats
+from .company_intelligence import (
+    CAREERS_PROBE_PATHS, classify_careers_probe, classify_domain_probe,
+    extract_domain_candidate_from_email,
+)
 from .core_bridge import (CoreSyncRecord, build_job_record, build_prepare_record,
                           build_score_record, build_transition_record, guess_company, is_due,
                           is_eligible_for_prepare, map_local_status_to_core_transition,
@@ -57,6 +61,13 @@ GOOGLE_INBOX = RUNTIME / "google" / "career-mail.json"
 GOOGLE_STATUS_CACHE = RUNTIME / "google" / "connection-status.json"
 GOOGLE_HEALTH = RUNTIME / "google" / "health.json"
 GOOGLE_HEALTH_ALERT_THRESHOLD = 3
+# Fase 2, Prompt 11 - Company Intelligence: batch pequeno + timeout curto +
+# cooldown real via companies.last_checked_at (coluna ja existente, Secao 20)
+# - nunca um crawler irrestrito. 1x/dia, fora dos horarios ja usados pelos
+# outros schedulers (6h market_scan, 7h watch_recheck, 8/12/18h daily).
+COMPANY_INTELLIGENCE_BATCH_SIZE = 10
+COMPANY_INTELLIGENCE_COOLDOWN_DAYS = 7
+COMPANY_INTELLIGENCE_PROBE_TIMEOUT = 10
 OPPORTUNITY_ASSEMBLY_HEALTH = RUNTIME / "opportunity_assembly" / "health.json"
 OPPORTUNITY_ASSEMBLY_JOB_BATCH = 25
 OPPORTUNITY_ASSEMBLY_SIGNAL_BATCH = 50
@@ -2037,6 +2048,7 @@ async def startup_scheduler() -> None:
     asyncio.create_task(market_scan_scheduler())
     asyncio.create_task(watch_recheck_scheduler())
     asyncio.create_task(opportunity_assembly_scheduler())
+    asyncio.create_task(company_intelligence_scheduler())
 
 
 @app.get("/health")
@@ -2392,9 +2404,9 @@ def _fetch_pending_jobs() -> list[dict]:
         return json.loads(response.read().decode("utf-8"))
 
 
-def _evaluate_job_opportunity(job_id: str) -> dict:
+def _evaluate_job_opportunity(job_id: str, triggered_by: str = "opportunity_assembly_scheduler") -> dict:
     request = Request(
-        CAREER_API_URL + f"/api/v1/jobs/{job_id}/evaluate?triggered_by=opportunity_assembly_scheduler",
+        CAREER_API_URL + f"/api/v1/jobs/{job_id}/evaluate?triggered_by={triggered_by}",
         data=b"{}", method="POST",
         headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"},
     )
@@ -2617,6 +2629,220 @@ async def opportunity_assembly_scheduler() -> None:
         except Exception as exc:
             event("OPPORTUNITY_ASSEMBLY_FAILED", error=type(exc).__name__)
         await asyncio.sleep(900)
+
+
+def _fetch_public_page(url: str) -> dict:
+    """Fase 2, Prompt 11, Secao 20/21 - fetch real, read-only, GET puro
+    (nunca executa JavaScript). So https; timeout curto; corpo truncado
+    (nunca guarda a pagina inteira); qualquer excecao vira UNVERIFIED no
+    caller, nunca propaga e nunca derruba o scheduler."""
+    if urlsplit(url).scheme != "https":
+        return {"status_code": None, "final_url": None, "body_snippet": None}
+    request = Request(url, headers={"User-Agent": "CareerOS-CompanyIntelligence/1.0 (production, read-only)"})
+    try:
+        with urlopen(request, timeout=COMPANY_INTELLIGENCE_PROBE_TIMEOUT) as response:
+            body = response.read(20000).decode("utf-8", errors="replace")
+            return {"status_code": response.status, "final_url": response.geturl(), "body_snippet": body}
+    except Exception:
+        return {"status_code": None, "final_url": None, "body_snippet": None}
+
+
+def _fetch_companies_for_intelligence() -> list[dict]:
+    request = Request(CAREER_API_URL + "/api/v1/companies?limit=500",
+                       headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}"})
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _fetch_company_jobs(company_id: str) -> list[dict]:
+    request = Request(CAREER_API_URL + f"/api/v1/jobs?company_id={company_id}&limit=50",
+                       headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}"})
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _calculate_job_score(job_id: str) -> dict:
+    """Reavalia Score V2 (POST /jobs/{id}/score, ja idempotente - upsert em
+    job_scores) apos um enrichment real de Company Intelligence (Secao
+    17). Nunca cria Application, nunca envia nada."""
+    request = Request(CAREER_API_URL + f"/api/v1/jobs/{job_id}/score",
+                       data=b"{}", method="POST",
+                       headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"})
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _update_company_intelligence(company_id: str, payload: dict) -> dict:
+    request = Request(CAREER_API_URL + f"/api/v1/companies/{company_id}",
+                       data=json.dumps(payload).encode("utf-8"), method="PATCH",
+                       headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"})
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _needs_company_intelligence_check(company: dict) -> bool:
+    """Cooldown real via companies.last_checked_at (coluna ja existente) -
+    Secao 20: nunca martelar o mesmo site repetidamente. Empresa com
+    domain E careers_url ja resolvidos nao precisa mais ser revisitada por
+    este ciclo especifico (Watch/recheck futuro, Secao 14, cuidaria de
+    revalidacao periodica - fora do escopo de re-descoberta deste prompt)."""
+    if company.get("domain") and company.get("careers_url"):
+        return False
+    last_checked_at = company.get("last_checked_at")
+    if not last_checked_at:
+        return True
+    try:
+        checked = datetime.fromisoformat(str(last_checked_at))
+    except ValueError:
+        return True
+    return (datetime.now(UTC) - checked).days >= COMPANY_INTELLIGENCE_COOLDOWN_DAYS
+
+
+async def _resolve_company_domain(company: dict) -> tuple[str | None, dict]:
+    """Secao 1/3: prefere official_recruiting_email da propria Company; se
+    ausente, procura um e-mail real ja extraido em algum Job dessa empresa
+    (structured_extraction.application_instructions ou jobs.recruiter_email -
+    caso real Zeleno Meds, que nao tem official_recruiting_email na Company
+    mas tem um e-mail real no Job). So promove a VERIFIED_OFFICIAL_DOMAIN
+    com uma resposta HTTP real (Secao 3)."""
+    candidate = extract_domain_candidate_from_email(company.get("official_recruiting_email"))
+    source = "official_recruiting_email"
+    if not candidate:
+        jobs = await asyncio.to_thread(_fetch_company_jobs, company["id"])
+        for job in jobs:
+            email = job.get("recruiter_email")
+            if not email:
+                structured = job.get("structured_extraction") or {}
+                email = ((structured.get("application_instructions") or {}).get("value") or {}).get(
+                    "recruiting_email")
+            candidate = extract_domain_candidate_from_email(email)
+            if candidate:
+                source = f"job_recruiting_email:{job['id']}"
+                break
+    if not candidate:
+        return None, {}
+    probe = await asyncio.to_thread(_fetch_public_page, f"https://{candidate}")
+    classification = classify_domain_probe(probe["status_code"], probe["final_url"], candidate)
+    if classification != "VERIFIED_OFFICIAL_DOMAIN":
+        return None, {"domain_candidate_rejected": {"candidate": candidate, "source": source}}
+    return candidate, {"domain": {"confidence": 90, "source": source,
+                                   "verified_at": datetime.now(UTC).isoformat()}}
+
+
+async def _discover_careers_url(domain: str) -> tuple[str | None, str | None, dict]:
+    """Secao 4/5: so persiste com evidencia real (keyword ou redirect para
+    ATS conhecido) - nunca assume que qualquer 200 e careers."""
+    for path in CAREERS_PROBE_PATHS:
+        url = f"https://{domain}{path}"
+        probe = await asyncio.to_thread(_fetch_public_page, url)
+        candidate = classify_careers_probe(probe["status_code"], probe["final_url"], probe["body_snippet"])
+        if not candidate:
+            continue
+        ats_match = detect_ats(candidate["final_url"])
+        if ats_match:
+            return candidate["final_url"], ats_match.adapter, {
+                "careers_url": {"confidence": 85, "path": path, "redirected_to_ats": True},
+                "ats_type": {"confidence": 90, "board_url": ats_match.board_url},
+            }
+        if candidate["matched_keyword"]:
+            return candidate["final_url"], None, {
+                "careers_url": {"confidence": 70, "path": path, "matched_keyword": True}}
+    return None, None, {}
+
+
+async def company_intelligence_cycle() -> dict:
+    """Fase 2, Prompt 11 - descoberta conservadora de domain/careers_url/
+    ATS oficiais (Secoes 1-5), reduzindo o gap real encontrado no Prompt
+    10 (0/97 empresas com domain/careers_url/ats_type). Apos qualquer
+    enrichment novo, reavalia Score/Brain dos Jobs canonicos dessa empresa
+    de forma idempotente (Secao 17) - nunca cria Opportunity nova, nunca
+    executa acao externa."""
+    if not CAREER_ADMIN_TOKEN:
+        event("COMPANY_INTELLIGENCE_SKIPPED", reason="missing_admin_token")
+        return {"companies_evaluated": 0}
+    started = datetime.now(UTC)
+    event("COMPANY_INTELLIGENCE_STARTED")
+    metrics = {"companies_evaluated": 0, "domains_verified": 0, "careers_discovered": 0,
+               "ats_detected": 0, "jobs_reevaluated": 0, "failed": 0}
+    try:
+        companies = await asyncio.to_thread(_fetch_companies_for_intelligence)
+        candidates = [item for item in companies if _needs_company_intelligence_check(item)]
+        candidates = candidates[:COMPANY_INTELLIGENCE_BATCH_SIZE]
+        for company in candidates:
+            try:
+                metrics["companies_evaluated"] += 1
+                update_payload: dict = {}
+                domain = company.get("domain")
+                if not domain:
+                    domain, domain_evidence = await _resolve_company_domain(company)
+                    if domain:
+                        metrics["domains_verified"] += 1
+                        update_payload["domain"] = domain
+                        update_payload.setdefault("evidence", {}).update(domain_evidence)
+                        event("COMPANY_DOMAIN_DISCOVERED", company_id=company["id"], domain=domain)
+                    elif domain_evidence:
+                        update_payload.setdefault("evidence", {}).update(domain_evidence)
+                if domain and not company.get("careers_url"):
+                    careers_url, ats_type, careers_evidence = await _discover_careers_url(domain)
+                    if careers_url:
+                        metrics["careers_discovered"] += 1
+                        update_payload["careers_url"] = careers_url
+                        update_payload.setdefault("evidence", {}).update(careers_evidence)
+                        event("CAREERS_URL_DISCOVERED", company_id=company["id"], careers_url=careers_url)
+                        if ats_type:
+                            metrics["ats_detected"] += 1
+                            update_payload["ats_type"] = ats_type
+                            event("ATS_DETECTED", company_id=company["id"], ats_type=ats_type)
+                await asyncio.to_thread(_update_company_intelligence, company["id"], update_payload)
+                if update_payload.get("domain") or update_payload.get("careers_url"):
+                    # Secao 18: Company Intelligence tambem pode melhorar
+                    # Channel Resolution - reusa exatamente o mesmo
+                    # channels/discover + action-plan do Opportunity
+                    # Assembly (Prompt 8/9), nunca reimplementado aqui.
+                    jobs = await asyncio.to_thread(_fetch_company_jobs, company["id"])
+                    for job in jobs:
+                        try:
+                            await asyncio.to_thread(_calculate_job_score, job["id"])
+                            result = await asyncio.to_thread(
+                                _evaluate_job_opportunity, job["id"], "company_intelligence_scheduler")
+                            metrics["jobs_reevaluated"] += 1
+                            opportunity_id = result.get("opportunity_id")
+                            if opportunity_id and result.get("decision") in _ACTIONABLE_JOB_DECISIONS:
+                                await asyncio.to_thread(_discover_opportunity_channels, opportunity_id)
+                                await asyncio.to_thread(_create_opportunity_action_plan, opportunity_id)
+                        except Exception as job_error:
+                            metrics["failed"] += 1
+                            event("COMPANY_INTELLIGENCE_JOB_REEVAL_FAILED", job_id=job.get("id"),
+                                  error=type(job_error).__name__)
+            except Exception as item_error:
+                metrics["failed"] += 1
+                event("COMPANY_INTELLIGENCE_ITEM_FAILED", company_id=company.get("id"),
+                      error=type(item_error).__name__)
+        metrics["duration_ms"] = int((datetime.now(UTC) - started).total_seconds() * 1000)
+        event("COMPANY_INTELLIGENCE_COMPLETED", **metrics)
+        return metrics
+    except Exception as exc:
+        metrics["failed"] += 1
+        metrics["duration_ms"] = int((datetime.now(UTC) - started).total_seconds() * 1000)
+        event("COMPANY_INTELLIGENCE_FAILED", error=type(exc).__name__, **metrics)
+        return metrics
+
+
+async def company_intelligence_scheduler() -> None:
+    """1x/dia, as 5h - antes de market_scan (6h)/watch_recheck (7h)/daily
+    (8h), para que domain/careers/ATS recem-descobertos ja estejam
+    disponiveis quando os outros ciclos rodarem no mesmo dia."""
+    last_slot = ""
+    while True:
+        now = datetime.now().astimezone()
+        slot = now.date().isoformat()
+        if now.hour == 5 and slot != last_slot:
+            last_slot = slot
+            try:
+                await company_intelligence_cycle()
+            except Exception as exc:
+                event("COMPANY_INTELLIGENCE_FAILED", error=type(exc).__name__)
+        await asyncio.sleep(60)
 
 
 @app.post("/google/scan")
