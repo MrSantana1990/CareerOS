@@ -80,7 +80,16 @@ def test_o_cooldown_never_applies_from_a_last_checked_at_set_before_this_feature
     # do cooldown mesmo nunca tendo sido processada pela Company
     # Intelligence de fato.
     body = _sync_function_body(_main_source(), "_needs_company_intelligence_check")
-    assert '"domain" not in evidence and "domain_candidate_rejected" not in evidence' in body
+    assert '{"domain", "domain_candidate_rejected", "no_email_source_found"} & evidence.keys()' in body
+
+
+def test_o_no_email_anywhere_still_marks_evidence_so_the_batch_advances() -> None:
+    # Achado real de producao: sem essa marca, uma empresa sem e-mail
+    # derivavel em lugar nenhum nunca entraria em cooldown - o batch ficaria
+    # travado reprocessando as mesmas empresas "sem esperanca" para sempre,
+    # em vez de avancar pela lista real de 99 empresas.
+    body = _function_body(_main_source(), "_resolve_company_domain")
+    assert "no_email_source_found" in body
 
 
 # P: bounded concurrency / batch / timeout -----------------------------------------------------------------

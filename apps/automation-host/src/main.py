@@ -2699,7 +2699,7 @@ def _needs_company_intelligence_check(company: dict) -> bool:
     if company.get("domain") and company.get("careers_url"):
         return False
     evidence = company.get("evidence") or {}
-    if "domain" not in evidence and "domain_candidate_rejected" not in evidence:
+    if not ({"domain", "domain_candidate_rejected", "no_email_source_found"} & evidence.keys()):
         return True
     last_checked_at = company.get("last_checked_at")
     if not last_checked_at:
@@ -2733,7 +2733,14 @@ async def _resolve_company_domain(company: dict) -> tuple[str | None, dict]:
                 source = f"job_recruiting_email:{job['id']}"
                 break
     if not candidate:
-        return None, {}
+        # Achado real de producao: sem NENHUMA marca em evidence, uma
+        # empresa sem e-mail derivavel em lugar nenhum (Company nem Jobs)
+        # nunca entraria em cooldown - _needs_company_intelligence_check
+        # a re-selecionaria em TODO ciclo, para sempre, travando o batch
+        # sempre nas mesmas empresas "sem esperanca" em vez de avancar
+        # pela lista real. no_email_source_found conta como "ja checado"
+        # tanto quanto domain_candidate_rejected.
+        return None, {"no_email_source_found": {"checked_at": datetime.now(UTC).isoformat()}}
     probe = await asyncio.to_thread(_fetch_public_page, f"https://{candidate}")
     classification = classify_domain_probe(probe["status_code"], probe["final_url"], candidate)
     if classification != "VERIFIED_OFFICIAL_DOMAIN":
