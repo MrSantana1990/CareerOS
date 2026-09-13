@@ -176,6 +176,21 @@ def test_gmail_reauth_intervention_only_called_when_health_classifies_as_auth_re
     assert "_create_gmail_reauth_intervention" in body
 
 
+def test_gmail_reauth_intervention_gate_uses_gte_not_exact_threshold_crossing() -> None:
+    # Achado real de validacao em producao (Prompt 8): consecutive_failures
+    # persiste em disco entre restarts do container. Um outage que ja
+    # estava acima do threshold ANTES deste deploy (achado real: 165 falhas
+    # consecutivas) nunca voltaria a bater no valor exato do threshold com
+    # "==" - por isso o gate da intervencao usa ">=", dissociado do evento
+    # GOOGLE_MAIL_AUTH_BROKEN (que continua disparando so uma vez, no
+    # cruzamento exato, para nao inundar o log de eventos).
+    body = _function_body(_main_source(), "google_mail_scheduler")
+    assert "if consecutive_failures >= GOOGLE_HEALTH_ALERT_THRESHOLD:" in body
+    auth_broken_start = body.index("if consecutive_failures == GOOGLE_HEALTH_ALERT_THRESHOLD:")
+    auth_broken_block = body[auth_broken_start:auth_broken_start + 250]
+    assert 'event("GOOGLE_MAIL_AUTH_BROKEN"' in auth_broken_block
+
+
 def test_opportunity_assembly_cycle_updates_scheduler_health_on_success_and_failure() -> None:
     # Secao 9: last_started_at/last_completed_at/last_success_at/
     # last_failure_at/consecutive_failures/items_found/items_processed -
