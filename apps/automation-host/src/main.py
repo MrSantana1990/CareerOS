@@ -57,6 +57,9 @@ GOOGLE_INBOX = RUNTIME / "google" / "career-mail.json"
 GOOGLE_STATUS_CACHE = RUNTIME / "google" / "connection-status.json"
 GOOGLE_HEALTH = RUNTIME / "google" / "health.json"
 GOOGLE_HEALTH_ALERT_THRESHOLD = 3
+OPPORTUNITY_ASSEMBLY_HEALTH = RUNTIME / "opportunity_assembly" / "health.json"
+OPPORTUNITY_ASSEMBLY_JOB_BATCH = 25
+OPPORTUNITY_ASSEMBLY_SIGNAL_BATCH = 50
 CORE_SYNC_OUTBOX = RUNTIME / "core-sync-outbox.jsonl"
 CORE_SYNC_DEAD_LETTER = RUNTIME / "core-sync-dead-letter.jsonl"
 CORE_SYNC_LINKS = RUNTIME / "core-sync-links.json"
@@ -1899,6 +1902,66 @@ async def core_sync_scheduler() -> None:
         await asyncio.sleep(30)
 
 
+def classify_gmail_health(token_exists: bool, consecutive_failures: int, last_error: str | None) -> str:
+    """Fase 2, Prompt 8, Secao 8 - HEALTHY/DEGRADED/AUTH_REQUIRED/DOWN,
+    nunca mascarado atras de retry silencioso infinito."""
+    if not token_exists:
+        return "AUTH_REQUIRED"
+    if consecutive_failures == 0:
+        return "HEALTHY"
+    if consecutive_failures < GOOGLE_HEALTH_ALERT_THRESHOLD:
+        return "DEGRADED"
+    if last_error == "RefreshError":
+        return "AUTH_REQUIRED"
+    return "DOWN"
+
+
+def classify_gmail_auth_failure_root_cause(error_type: str, error_detail: str) -> str:
+    """O proprio Google nao distingue TOKEN_EXPIRED de TOKEN_REVOKED no
+    corpo do erro - os dois chegam como 'invalid_grant' identico (achado
+    real, Prompt 7.1: RefreshError('invalid_grant: Token has been expired
+    or revoked.', ...)). Reportar os dois juntos como REFRESH_TOKEN_INVALID
+    e honesto; fabricar uma distincao que a API nao oferece nao seria."""
+    if error_type != "RefreshError":
+        return "OTHER"
+    detail = (error_detail or "").lower()
+    if "invalid_scope" in detail:
+        return "SCOPE_CHANGED"
+    if "invalid_client" in detail or "unauthorized_client" in detail:
+        return "CLIENT_CONFIGURATION"
+    if "invalid_grant" in detail:
+        return "REFRESH_TOKEN_INVALID"
+    return "OTHER"
+
+
+def _create_gmail_reauth_intervention(root_cause: str) -> None:
+    """Reusa a rota /interventions do Core (mesmo dedup por
+    evidence.deduplication_key + status=PENDING ja usado pelo Action Engine,
+    Prompt 5) - so dispara uma vez por outage real, nunca uma por ciclo."""
+    if not CAREER_ADMIN_TOKEN:
+        return
+    payload = {
+        "executor_id": "gmail-scheduler", "reason": "AUTH_REQUIRED",
+        "title": "Gmail requer reautorização (refresh token revogado/expirado)",
+        "instructions": (
+            f"O scheduler de Gmail está falhando continuamente (causa raiz: {root_cause}). "
+            "Refaça o consentimento OAuth do Gmail (mesmo fluxo humano já usado para o "
+            "InfoJobs) - não é um bug corrigível por código."
+        ),
+        "evidence": {"deduplication_key": "gmail:oauth_reauthorization_required", "root_cause": root_cause},
+    }
+    try:
+        request = Request(
+            CAREER_API_URL + "/api/v1/interventions",
+            data=json.dumps(payload).encode("utf-8"), method="POST",
+            headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"},
+        )
+        urlopen(request, timeout=20)
+        event("GMAIL_REAUTH_INTERVENTION_CREATED", root_cause=root_cause)
+    except Exception as exc:
+        event("GMAIL_REAUTH_INTERVENTION_FAILED", error=type(exc).__name__)
+
+
 async def google_mail_scheduler() -> None:
     await asyncio.sleep(20)
     while True:
@@ -1932,15 +1995,27 @@ async def google_mail_scheduler() -> None:
                 })
             except Exception as exc:
                 consecutive_failures = health.get("consecutive_failures", 0) + 1
+                error_detail = str(exc)[:300]
                 save_json(GOOGLE_HEALTH, {
                     "consecutive_failures": consecutive_failures,
                     "last_success_at": health.get("last_success_at"),
                     "last_error": type(exc).__name__,
+                    "last_error_detail": error_detail,
                     "last_error_at": datetime.now(UTC).isoformat(),
                 })
                 event("GOOGLE_MAIL_SCAN_FAILED", error=type(exc).__name__, consecutive_failures=consecutive_failures)
                 if consecutive_failures == GOOGLE_HEALTH_ALERT_THRESHOLD:
-                    event("GOOGLE_MAIL_AUTH_BROKEN", error=type(exc).__name__, consecutive_failures=consecutive_failures)
+                    # Secao 8 (Prompt 8): classifica a causa raiz e cria UMA
+                    # Human Intervention real (dedup por evidence.deduplication_key
+                    # - nao repete a cada novo ciclo de falha) em vez de deixar
+                    # o retry silencioso rodar para sempre (achado real do
+                    # Prompt 7.1: 159 tentativas consecutivas sem nenhum sinal
+                    # acionavel para o humano).
+                    root_cause = classify_gmail_auth_failure_root_cause(type(exc).__name__, error_detail)
+                    event("GOOGLE_MAIL_AUTH_BROKEN", error=type(exc).__name__,
+                          consecutive_failures=consecutive_failures, root_cause=root_cause)
+                    if classify_gmail_health(True, consecutive_failures, type(exc).__name__) == "AUTH_REQUIRED":
+                        await asyncio.to_thread(_create_gmail_reauth_intervention, root_cause)
         await asyncio.sleep(600)
 
 
@@ -1953,6 +2028,7 @@ async def startup_scheduler() -> None:
     asyncio.create_task(core_sync_scheduler())
     asyncio.create_task(market_scan_scheduler())
     asyncio.create_task(watch_recheck_scheduler())
+    asyncio.create_task(opportunity_assembly_scheduler())
 
 
 @app.get("/health")
@@ -1985,6 +2061,7 @@ async def get_metrics() -> dict[str, object]:
         status = str(application.get("status") or "UNKNOWN")
         statuses[status] = statuses.get(status, 0) + 1
     google_health = load_json(GOOGLE_HEALTH, {})
+    opportunity_assembly_health = load_json(OPPORTUNITY_ASSEMBLY_HEALTH, {})
     return {
         "service_online": True,
         "executor_mode": "vps" if BROWSER_HEADLESS else "local",
@@ -2000,6 +2077,9 @@ async def get_metrics() -> dict[str, object]:
         "google_mail_healthy": google_health.get("consecutive_failures", 0) < GOOGLE_HEALTH_ALERT_THRESHOLD,
         "google_mail_consecutive_failures": google_health.get("consecutive_failures", 0),
         "google_mail_last_success_at": google_health.get("last_success_at"),
+        "gmail_health": classify_gmail_health(GOOGLE_TOKEN.exists(), google_health.get("consecutive_failures", 0),
+                                               google_health.get("last_error")),
+        "opportunity_assembly": opportunity_assembly_health,
     }
 
 
@@ -2293,6 +2373,182 @@ async def watch_recheck_scheduler() -> None:
             except Exception as exc:
                 event("WATCH_RECHECK_FAILED", error=type(exc).__name__)
         await asyncio.sleep(60)
+
+
+def _fetch_pending_jobs() -> list[dict]:
+    request = Request(
+        CAREER_API_URL + f"/api/v1/jobs?pending_evaluation=true&limit={OPPORTUNITY_ASSEMBLY_JOB_BATCH}",
+        headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}"},
+    )
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _evaluate_job_opportunity(job_id: str) -> dict:
+    request = Request(
+        CAREER_API_URL + f"/api/v1/jobs/{job_id}/evaluate?triggered_by=opportunity_assembly_scheduler",
+        data=b"{}", method="POST",
+        headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"},
+    )
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _fetch_new_signals() -> list[dict]:
+    request = Request(
+        CAREER_API_URL + f"/api/v1/signals?status=NEW&limit={OPPORTUNITY_ASSEMBLY_SIGNAL_BATCH}",
+        headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}"},
+    )
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _evaluate_signal_opportunity(signal_id: str) -> dict:
+    request = Request(
+        CAREER_API_URL + f"/api/v1/signals/{signal_id}/evaluate?triggered_by=opportunity_assembly_scheduler",
+        data=b"{}", method="POST",
+        headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"},
+    )
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _discover_opportunity_channels(opportunity_id: str) -> dict:
+    request = Request(
+        CAREER_API_URL + f"/api/v1/opportunities/{opportunity_id}/channels/discover",
+        data=b"{}", method="POST",
+        headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"},
+    )
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _create_opportunity_action_plan(opportunity_id: str) -> dict:
+    # DRY RUN sempre (Secao 7/Prompt 5) - so persiste um Application Plan
+    # auditavel, nunca envia e-mail nem submete formulario. AUTO_APPLY_ENABLED
+    # continua o gate real de qualquer execucao externa, inalterado aqui.
+    request = Request(
+        CAREER_API_URL + f"/api/v1/opportunities/{opportunity_id}/action-plan",
+        data=b"{}", method="POST",
+        headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"},
+    )
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+_ACTIONABLE_JOB_DECISIONS = {"PREPARE", "ACTIONABLE", "HUMAN_REQUIRED"}
+
+
+async def _assemble_job_opportunity(job: dict, metrics: dict) -> None:
+    """Uma vaga com falha isolada (Secao 10) - excecao aqui nunca aborta o
+    lote inteiro, so este item."""
+    try:
+        result = await asyncio.to_thread(_evaluate_job_opportunity, job["id"])
+        metrics["items_processed"] += 1
+        if result.get("created"):
+            metrics["opportunities_created"] += 1
+        decision = result.get("decision")
+        opportunity_id = result.get("opportunity_id")
+        if decision == "HUMAN_REQUIRED":
+            metrics["human_required"] += 1
+        if opportunity_id and decision in _ACTIONABLE_JOB_DECISIONS:
+            await asyncio.to_thread(_discover_opportunity_channels, opportunity_id)
+            metrics["channels_resolved"] += 1
+            await asyncio.to_thread(_create_opportunity_action_plan, opportunity_id)
+            metrics["action_plans_created"] += 1
+        event("OPPORTUNITY_ASSEMBLY_JOB_EVALUATED", job_id=job.get("id"), decision=decision,
+              created=bool(result.get("created")))
+    except Exception as exc:
+        metrics["failed"] += 1
+        event("OPPORTUNITY_ASSEMBLY_JOB_FAILED", job_id=job.get("id"), error=type(exc).__name__)
+
+
+async def _assemble_signal_opportunity(signal: dict, metrics: dict) -> None:
+    try:
+        result = await asyncio.to_thread(_evaluate_signal_opportunity, signal["id"])
+        metrics["items_processed"] += 1
+        if result.get("created"):
+            metrics["opportunities_created"] += 1
+        event("OPPORTUNITY_ASSEMBLY_SIGNAL_EVALUATED", signal_id=signal.get("id"),
+              decision=result.get("decision"), created=bool(result.get("created")))
+    except Exception as exc:
+        metrics["failed"] += 1
+        event("OPPORTUNITY_ASSEMBLY_SIGNAL_FAILED", signal_id=signal.get("id"), error=type(exc).__name__)
+
+
+async def opportunity_assembly_cycle() -> dict:
+    """Fase 2, Prompt 8 - a peca que faltava (achado central do Prompt 7.1:
+    130 Signals + 96 Jobs novos autonomos, 0 Opportunities, em 4 dias reais
+    de producao). So ORQUESTRA rotas ja existentes e testadas (Prompts 4/5/6)
+    - Opportunity Brain (/evaluate) e Action Engine (/channels/discover,
+    /action-plan) nao sao reimplementados aqui. Checkpoint 100% derivado do
+    Postgres (pending_evaluation=NOT EXISTS opportunity / signals.status=NEW),
+    nunca de um watermark em memoria - sobrevive a restart/deploy/crash sem
+    perder nem duplicar trabalho, e cada rota chamada e idempotente por
+    conta propria (dedup_fingerprint). JOB_DISCOVERED e excluido da fila de
+    Signals de proposito (Secao 11 - Job e a entidade canonica para vaga
+    estruturada): todo Signal JOB_DISCOVERED ja tem o Job correspondente,
+    que produz sua propria Opportunity pelo caminho de Job - avaliar o
+    Signal tambem duplicaria a Opportunity da mesma vaga real. Nunca chama
+    nada alem de evaluate/channels/discover/action-plan - todas dry-run,
+    nenhuma submete nada externamente."""
+    if not CAREER_ADMIN_TOKEN:
+        event("OPPORTUNITY_ASSEMBLY_SKIPPED", reason="missing_admin_token")
+        return {"items_found": 0}
+    started = datetime.now(UTC)
+    event("OPPORTUNITY_ASSEMBLY_STARTED")
+    metrics = {"items_found": 0, "items_processed": 0, "opportunities_created": 0,
+               "channels_resolved": 0, "action_plans_created": 0, "human_required": 0, "failed": 0}
+    health = load_json(OPPORTUNITY_ASSEMBLY_HEALTH, {"consecutive_failures": 0})
+    try:
+        pending_jobs = await asyncio.to_thread(_fetch_pending_jobs)
+        new_signals = [item for item in await asyncio.to_thread(_fetch_new_signals)
+                       if item.get("type") != "JOB_DISCOVERED"]
+        metrics["items_found"] = len(pending_jobs) + len(new_signals)
+        for job in pending_jobs:
+            await _assemble_job_opportunity(job, metrics)
+        for signal in new_signals:
+            await _assemble_signal_opportunity(signal, metrics)
+        metrics["duration_ms"] = int((datetime.now(UTC) - started).total_seconds() * 1000)
+        event("OPPORTUNITY_ASSEMBLY_COMPLETED", **metrics)
+        save_json(OPPORTUNITY_ASSEMBLY_HEALTH, {
+            "consecutive_failures": 0,
+            "last_started_at": started.isoformat(),
+            "last_completed_at": datetime.now(UTC).isoformat(),
+            "last_success_at": datetime.now(UTC).isoformat(),
+            "last_failure_at": health.get("last_failure_at"),
+            "items_found": metrics["items_found"], "items_processed": metrics["items_processed"],
+        })
+        return metrics
+    except Exception as exc:
+        consecutive_failures = health.get("consecutive_failures", 0) + 1
+        metrics["duration_ms"] = int((datetime.now(UTC) - started).total_seconds() * 1000)
+        event("OPPORTUNITY_ASSEMBLY_FAILED", error=type(exc).__name__,
+              consecutive_failures=consecutive_failures, **metrics)
+        save_json(OPPORTUNITY_ASSEMBLY_HEALTH, {
+            "consecutive_failures": consecutive_failures,
+            "last_started_at": started.isoformat(),
+            "last_completed_at": health.get("last_completed_at"),
+            "last_success_at": health.get("last_success_at"),
+            "last_failure_at": datetime.now(UTC).isoformat(),
+            "items_found": metrics["items_found"], "items_processed": metrics["items_processed"],
+        })
+        return metrics
+
+
+async def opportunity_assembly_scheduler() -> None:
+    """A cada 15 minutos, nao 1x/dia como market_scan/watch_recheck -
+    Signals/Jobs chegam o dia inteiro via ingest_job/market_scan, e o
+    proposito desta peca e fechar o loop com atraso baixo, nao so uma vez
+    por dia. Uma falha do ciclo nunca derruba o scheduler (mesmo padrao de
+    market_scan_scheduler/watch_recheck_scheduler)."""
+    await asyncio.sleep(45)
+    while True:
+        try:
+            await opportunity_assembly_cycle()
+        except Exception as exc:
+            event("OPPORTUNITY_ASSEMBLY_FAILED", error=type(exc).__name__)
+        await asyncio.sleep(900)
 
 
 @app.post("/google/scan")
