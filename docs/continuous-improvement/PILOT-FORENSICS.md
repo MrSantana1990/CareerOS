@@ -76,3 +76,75 @@ O mecanismo do scheduler (`google_mail_scheduler`) continua **AUTONOMOUS_OBSERVE
 5. **Correlação de e-mail depende de o Job/Application existir em Core com `company_domain` real** — 2 comunicações reais (TEMBICI, GRUPO GPS) chegaram e foram classificadas corretamente, mas ficaram `UNMATCHED` pela mesma razão estrutural do caso Randstad/Mercado Livre (Prompt 6): nenhuma Application correspondente existe no Core para essas empresas.
 
 Estes 5 itens foram adicionados ao final de `IMPROVEMENT_BACKLOG.md` sob uma nova seção "Fase 2 — achados do Pilot (Prompt 7.1)".
+
+---
+
+## 7. OPPORTUNITY_ASSEMBLY_ARCHITECTURE (Prompt 8)
+
+Resposta ao gargalo #1 da Seção 6: um novo scheduler, `opportunity_assembly_scheduler`, registrado em `startup_scheduler()` no `automation-host` (mesmo padrão de `market_scan_scheduler`/`watch_recheck_scheduler`), rodando a cada 15 minutos (não 1x/dia — Signals/Jobs chegam o dia inteiro). Ele **só orquestra rotas já existentes e testadas** (Prompts 4/5/6) via HTTP:
+
+```
+NEW/PENDING Job/Signal → POST /jobs/{id}/evaluate ou /signals/{id}/evaluate (Opportunity Brain)
+  → se decisão ∈ {PREPARE, ACTIONABLE, HUMAN_REQUIRED}:
+    → POST /opportunities/{id}/channels/discover (Channel Resolution)
+    → POST /opportunities/{id}/action-plan (Action Engine, sempre DRY RUN)
+```
+
+Nenhuma lógica de eligibility/scoring/channel/policy foi recriada — o Brain e o Action Engine continuam sendo a única fonte de verdade dessas decisões.
+
+**Checkpoint**: 100% derivado do Postgres, nunca de um watermark em memória — `GET /jobs?pending_evaluation=true` (`company_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM opportunities WHERE job_id=jobs.id)`) e `GET /signals?status=NEW` (já existente) filtrando `type != JOB_DISCOVERED` no scheduler. Sobrevive a restart/deploy/crash sem estado externo para perder — comprovado na prática nesta mesma validação (ver Seção 9: o container foi reiniciado por um redeploy no meio da validação e nenhum job foi reprocessado nem perdido).
+
+**Exclusão deliberada de `JOB_DISCOVERED`** (Seção 11 do prompt): todo Signal `JOB_DISCOVERED` já tem o Job canônico correspondente, que produz sua própria Opportunity pelo caminho de Job — avaliar o Signal também duplicaria a Opportunity da mesma vaga real. Confirmado em produção: 0 duplicatas (ver Seção 9).
+
+**Provenance**: novo parâmetro opcional `triggered_by` em `/jobs/{id}/evaluate` e `/signals/{id}/evaluate`, gravado em `evidence.orchestration` (jsonb, **nenhuma migration**) apenas quando informado. O scheduler passa `triggered_by=opportunity_assembly_scheduler`; qualquer chamada manual/futura sem esse parâmetro continua funcionando exatamente como antes.
+
+**Coexistência com o pipeline tradicional** (Seção 12 do prompt, decisão explícita): **coexistir**, não substituir nem consumir. As duas linhagens operam sobre chaves estruturalmente disjuntas (`job_id` em `applications` vs `opportunity_id` em `opportunities`) — `full_daily_pipeline` continua intocado (nenhuma linha de código alterada em `daily_scheduler`/`full_daily_pipeline`), confirmado por teste de regressão (`test_traditional_pipeline_scheduler_is_untouched_by_opportunity_assembly`) e por contagem estável de `applications` (170, igual ao fim do Prompt 7.1) até o próximo ciclo natural do `daily_scheduler` (8/12/18h UTC).
+
+## 8. AUTONOMY_LOOP
+
+O loop PERCEIVE → REMEMBER → REASON → PLAN/ACTION agora fecha de ponta a ponta sem intervenção humana, até o ponto correto de parada (decisão do próprio Action Engine, nunca um bypass):
+
+```
+Job pendente (Perception, Prompts 3/8)
+  → Opportunity Brain avalia (Prompt 4): eligibility/fit_score/hard_blocks/unknowns
+  → Opportunity persistida com discovery_source=OPPORTUNITY_BRAIN + evidence.orchestration.triggered_by=opportunity_assembly_scheduler
+  → Channel Resolution tenta resolver um canal real (Prompt 6)
+  → Action Engine calcula Action Policy + Application Plan (Prompt 5), sempre DRY RUN
+  → se autonomy_class=HUMAN_REQUIRED: Human Intervention criada (fila humana), NUNCA um envio automático
+```
+
+Nenhum passo aqui envia e-mail, submete formulário ou muda estado externo — `AUTO_APPLY_ENABLED` permanece `false` em ambos os containers (`api`, `integrations`), confirmado por leitura direta do ambiente de produção após o deploy.
+
+## 9. GMAIL_HEALTH
+
+Estado real classificado (função pura `classify_gmail_health`, valores HEALTHY/DEGRADED/AUTH_REQUIRED/DOWN): **`AUTH_REQUIRED`** — o refresh token OAuth do Gmail segue revogado/expirado (mesmo outage documentado na Seção 5.1), agora em **166 falhas consecutivas** no momento desta validação.
+
+Causa raiz classificada por `classify_gmail_auth_failure_root_cause`: **`REFRESH_TOKEN_INVALID`** — o próprio Google não distingue "expirado" de "revogado" no corpo do erro (ambos chegam como `invalid_grant` idêntico), então reportar os dois juntos é a classificação honesta, não uma simplificação.
+
+**Bug real encontrado e corrigido durante a validação em produção deste mesmo prompt** (PR #121, commit `bd04d18`): a primeira versão do gate de criação de intervenção usava `consecutive_failures == GOOGLE_HEALTH_ALERT_THRESHOLD` (3) — como esse contador persiste em disco entre restarts e o outage real já estava em 165 falhas antes deste deploy, ele nunca voltaria a cruzar o valor exato de 3, e a intervenção nunca seria criada para o outage já em curso. Corrigido para `>=` (dissociado do evento `GOOGLE_MAIL_AUTH_BROKEN`, que continua disparando só uma vez no cruzamento exato, para não inundar o log). Validado em produção logo em seguida: `GMAIL_REAUTH_INTERVENTION_CREATED` disparou e uma `human_interventions` real foi criada (`id=35bd5f41-e30e-4f72-9d44-9aad8f4ea33f`, `reason=AUTH_REQUIRED`, `status=PENDING`, `evidence.root_cause=REFRESH_TOKEN_INVALID`).
+
+Nenhum retry silencioso infinito permanece sem sinal acionável para o humano — o scheduler continua tentando a cada 10 minutos (comportamento correto, o token pode ser renovado a qualquer momento por uma reautorização humana real), mas agora existe exatamente uma Human Intervention pendente e visível na fila, não 166 falhas silenciosas no log.
+
+## 10. POST_PROMPT_8_METRICS
+
+Consultado diretamente no Postgres de produção, ~15 minutos após o deploy (2 ciclos naturais completos do `opportunity_assembly_scheduler`, nenhum Job/Signal fabricado para a validação):
+
+| Métrica | Valor | Observação |
+|---|---|---|
+| OPPORTUNITY_ASSEMBLY_RUNS | 2 (naturais, +mais a cada 15min) | ambos com `failed=0` |
+| ITEMS_FOUND (cumulativo) | 61 | 32 + 29 |
+| ITEMS_PROCESSED | 61 | 100% dos encontrados |
+| OPPORTUNITIES_CREATED | 50 | limitado pelo batch de 25 jobs/ciclo |
+| ELIGIBLE (fit_score calculado) | 50/50 | todas com `fit_score` do Score V2 reusado |
+| CHANNELS_RESOLVED (tentativa) | 50 | 43 CAPTCHA_REQUIRED, 7 AUTH_REQUIRED — nenhum canal VERIFIED_AVAILABLE ainda nesta amostra |
+| ACTION_PLANS_CREATED | 50 | todos DRY RUN |
+| HUMAN_REQUIRED | 50/50 | consequência honesta de nenhum canal seguro disponível na amostra, não um bug |
+| FAILED | 0 | |
+| RETRIED | 0 (não aplicável — falha de item não tem retry automático, só isolamento) | |
+| DUPLICATES_PREVENTED | confirmado 0 duplicatas reais (50 `job_id` distintos para 50 Opportunities, `SELECT job_id, count(*) ... HAVING count(*)>1` vazio) | |
+| PRE_EXISTING_PENDING processados | 50 (todos — backlog de 269 Jobs pendentes acumulado desde antes deste deploy) | |
+| POST_DEPLOY_NEW processados | 0 até o momento desta medição | nenhum Job novo chegou via `ingest_job`/`market_scan` na janela observada |
+| Jobs pendentes restantes | 219 (de um backlog de 269) | será drenado em ciclos subsequentes, ~25/15min |
+| EXTERNAL_ACTION_OCCURRED | NÃO | `applications.status IN (SENT,CONFIRMED)` inalterado (`CONFIRMED=1`, o mesmo caso histórico Deutsche Bank) |
+| AUTO_APPLY_ENABLED | false (confirmado nos containers `api` e `integrations`) | |
+| GMAIL_REAUTH_INTERVENTION | criada (ver Seção 9) | |
