@@ -73,6 +73,16 @@ def test_o_cooldown_uses_the_real_last_checked_at_column() -> None:
     assert 'company.get("last_checked_at")' in body
 
 
+def test_o_cooldown_never_applies_from_a_last_checked_at_set_before_this_feature_existed() -> None:
+    # Achado real de producao: Deutsche Bank ja tinha last_checked_at
+    # recente de uma chamada PATCH manual anterior a esta feature (Cycle
+    # 009) - sem checar companies.evidence, isso a excluiria incorretamente
+    # do cooldown mesmo nunca tendo sido processada pela Company
+    # Intelligence de fato.
+    body = _sync_function_body(_main_source(), "_needs_company_intelligence_check")
+    assert '"domain" not in evidence and "domain_candidate_rejected" not in evidence' in body
+
+
 # P: bounded concurrency / batch / timeout -----------------------------------------------------------------
 
 def test_p_cycle_is_bounded_by_a_fixed_batch_size() -> None:

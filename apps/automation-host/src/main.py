@@ -2685,9 +2685,22 @@ def _needs_company_intelligence_check(company: dict) -> bool:
     Secao 20: nunca martelar o mesmo site repetidamente. Empresa com
     domain E careers_url ja resolvidos nao precisa mais ser revisitada por
     este ciclo especifico (Watch/recheck futuro, Secao 14, cuidaria de
-    revalidacao periodica - fora do escopo de re-descoberta deste prompt)."""
+    revalidacao periodica - fora do escopo de re-descoberta deste prompt).
+
+    Achado real de producao (validacao deste prompt): last_checked_at e
+    compartilhado com o PATCH /companies/{id} generico (Cycle 009) - uma
+    empresa como a Deutsche Bank ja tinha last_checked_at recente de uma
+    chamada manual ANTERIOR a esta feature existir, o que a exclui
+    incorretamente do cooldown mesmo nunca tendo sido de fato processada
+    pela Company Intelligence. companies.evidence so ganha as chaves
+    'domain'/'domain_candidate_rejected' quando ESTE ciclo (ou um anterior
+    dele) realmente rodou - ausencia dessas chaves prova que o cooldown
+    nao se aplica, independente de last_checked_at."""
     if company.get("domain") and company.get("careers_url"):
         return False
+    evidence = company.get("evidence") or {}
+    if "domain" not in evidence and "domain_candidate_rejected" not in evidence:
+        return True
     last_checked_at = company.get("last_checked_at")
     if not last_checked_at:
         return True
