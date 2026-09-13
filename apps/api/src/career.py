@@ -166,11 +166,13 @@ class WatchUpdateInput(BaseModel):
 
 
 class CompanyIntelInput(BaseModel):
+    domain: str | None = Field(default=None, max_length=255)
     careers_url: str | None = Field(default=None, max_length=500)
     ats_type: str | None = Field(default=None, max_length=40)
     official_recruiting_email: str | None = Field(default=None, max_length=254)
     talent_pool_url: str | None = Field(default=None, max_length=500)
     br_presence: bool | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class JobInput(BaseModel):
@@ -890,13 +892,21 @@ async def reconcile_duplicate_jobs(dry_run: bool = True, slug: str = Depends(req
 
 
 @router.get("/jobs")
-async def list_jobs(limit: int = 100, pending_evaluation: bool = False,
+async def list_jobs(limit: int = 100, pending_evaluation: bool = False, company_id: UUID | None = None,
                      slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
     """pending_evaluation (Fase 2, Prompt 8): checkpoint da Opportunity
     Assembly - "pendente" e derivado 100% do estado persistido (nenhuma
     Opportunity ainda referencia este Job), nunca de um watermark/cursor
     em memoria que possa se perder num restart. Comportamento padrao
-    (pending_evaluation=False) inalterado - nenhum caller existente e afetado."""
+    (pending_evaluation=False) inalterado - nenhum caller existente e afetado.
+
+    company_id (Fase 2, Prompt 11): filtro aditivo para Company
+    Intelligence - encontrar, entre os Jobs reais de uma empresa, algum
+    e-mail de recrutamento ja extraido (structured_extraction.
+    application_instructions) quando a propria Company nao tem
+    official_recruiting_email persistido. company_id/recruiter_email/
+    structured_extraction sao campos NOVOS na resposta - aditivos, nunca
+    quebram um consumidor existente que ja ignora chaves desconhecidas."""
     org_id = await organization_id(slug)
     extra_where = ""
     order_by = "j.discovered_at DESC"
@@ -907,9 +917,12 @@ async def list_jobs(limit: int = 100, pending_evaluation: bool = False,
         extra_where = ("AND j.company_id IS NOT NULL AND j.dedup_status != 'DUPLICATE' "
                        "AND NOT EXISTS (SELECT 1 FROM opportunities o WHERE o.job_id=j.id)")
         order_by = "j.discovered_at ASC"
+    if company_id:
+        extra_where += " AND j.company_id = :company_id"
     query = text(f"""
         SELECT j.id, j.title, c.name AS company, j.canonical_url, j.location, j.country,
                j.work_model, j.seniority, j.validation_status AS status, j.discovered_at,
+               j.company_id, j.recruiter_email, j.structured_extraction,
                s.total AS score, s.decision AS recommendation
         FROM jobs j JOIN companies c ON c.id=j.company_id
         LEFT JOIN LATERAL (SELECT total, decision FROM job_scores WHERE job_id=j.id ORDER BY created_at DESC LIMIT 1) s ON true
@@ -918,7 +931,8 @@ async def list_jobs(limit: int = 100, pending_evaluation: bool = False,
         ORDER BY {order_by} LIMIT :limit
     """)
     async with SessionLocal() as session:
-        rows = (await session.execute(query, {"organization_id": org_id, "limit": min(max(limit, 1), 500)})).mappings()
+        rows = (await session.execute(query, {"organization_id": org_id, "limit": min(max(limit, 1), 500),
+                                                "company_id": company_id})).mappings()
     return [dict(row) for row in rows]
 
 
@@ -939,21 +953,27 @@ async def list_companies(limit: int = 100, slug: str = Depends(require_admin)) -
 @router.patch("/companies/{company_id}")
 async def update_company_intelligence(company_id: UUID, payload: CompanyIntelInput,
                                        slug: str = Depends(require_admin)) -> dict[str, Any]:
-    """Company Intelligence (Cycle 009): registra o que foi resolvido de
-    verdade sobre uma empresa (careers/ATS/talent pool/e-mail oficial) -
-    nunca inventa o que nao foi encontrado; campos nao informados aqui
-    preservam o valor ja salvo (COALESCE), nunca voltam a null."""
+    """Company Intelligence (Cycle 009, estendido no Prompt 11): registra o
+    que foi resolvido de verdade sobre uma empresa (domain/careers/ATS/
+    talent pool/e-mail oficial) - nunca inventa o que nao foi encontrado;
+    campos nao informados aqui preservam o valor ja salvo (COALESCE),
+    nunca voltam a null. evidence (Prompt 11) e sempre MESCLADO (||),
+    nunca sobrescrito - cada chamador (ex.: Company Intelligence discovery
+    no automation-host) so adiciona a evidencia do que ELE resolveu."""
     org_id = await organization_id(slug)
-    values = payload.model_dump()
-    values.update({"organization_id": org_id, "company_id": company_id})
+    values = payload.model_dump(exclude={"evidence"})
+    values.update({"organization_id": org_id, "company_id": company_id,
+                   "evidence": json.dumps(payload.evidence)})
     async with SessionLocal() as session:
         updated_id = await session.scalar(text("""
             UPDATE companies SET
+              domain = COALESCE(:domain, domain),
               careers_url = COALESCE(:careers_url, careers_url),
               ats_type = COALESCE(:ats_type, ats_type),
               official_recruiting_email = COALESCE(:official_recruiting_email, official_recruiting_email),
               talent_pool_url = COALESCE(:talent_pool_url, talent_pool_url),
               br_presence = COALESCE(:br_presence, br_presence),
+              evidence = evidence || CAST(:evidence AS jsonb),
               last_checked_at = now()
             WHERE id=:company_id AND organization_id=:organization_id AND deleted_at IS NULL
             RETURNING id
