@@ -952,7 +952,7 @@ async def list_jobs(limit: int = 100, pending_evaluation: bool = False, company_
     query = text(f"""
         SELECT j.id, j.title, c.name AS company, j.canonical_url, j.location, j.country,
                j.work_model, j.seniority, j.validation_status AS status, j.discovered_at,
-               j.company_id, j.recruiter_email, j.structured_extraction,
+               j.company_id, j.recruiter_email, j.structured_extraction, j.dedup_status,
                s.total AS score, s.decision AS recommendation
         FROM jobs j JOIN companies c ON c.id=j.company_id
         LEFT JOIN LATERAL (SELECT total, decision FROM job_scores WHERE job_id=j.id ORDER BY created_at DESC LIMIT 1) s ON true
