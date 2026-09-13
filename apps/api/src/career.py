@@ -1233,7 +1233,11 @@ async def calculate_job_score(job_id: UUID, slug: str = Depends(require_admin)) 
         if not job:
             raise HTTPException(status_code=404, detail="Vaga não encontrada.")
         profile = (await session.execute(text("SELECT city, work_models, target_roles, salary_expectation FROM candidate_profiles WHERE organization_id=:organization_id AND deleted_at IS NULL LIMIT 1"), {"organization_id": org_id})).mappings().first() or {}
-        verified = list((await session.scalars(text("SELECT name FROM skills WHERE organization_id=:organization_id AND verified=true AND deleted_at IS NULL"), {"organization_id": org_id})).all())
+        skill_rows = [dict(row) for row in (await session.execute(text("""
+            SELECT s.name, s.verified,
+                   (SELECT count(*) FROM skill_evidence e WHERE e.skill_id=s.id AND e.deleted_at IS NULL) AS evidence_count
+            FROM skills s WHERE s.organization_id=:organization_id AND s.deleted_at IS NULL
+        """), {"organization_id": org_id})).mappings()]
         codes = set((await session.scalars(text("SELECT code FROM career_rules WHERE organization_id=:organization_id AND enabled=true AND deleted_at IS NULL"), {"organization_id": org_id})).all())
         radars = [
             dict(row)
@@ -1245,7 +1249,14 @@ async def calculate_job_score(job_id: UUID, slug: str = Depends(require_admin)) 
             ).mappings()
         ]
         profile_data = dict(profile)
-        profile_data["verified_skills"] = verified
+        # Fase 2, Prompt 10, Secao 5: Score V2 tambem credita skills
+        # EVIDENCE_BACKED (skill_evidence real, ex.: mencionado no
+        # curriculo aprovado) - nao so VERIFIED - no calculo grosseiro de
+        # 'technology' (a distincao fina de confianca por skill continua
+        # no Brain, find_skill_evidence/_skill_confidence).
+        profile_data["verified_skills"] = [item["name"] for item in skill_rows if item.get("verified")]
+        profile_data["evidence_backed_skills"] = [item["name"] for item in skill_rows
+                                                   if not item.get("verified") and (item.get("evidence_count") or 0) > 0]
         salary_text = str(profile_data.get("salary_expectation") or "")
         salary_number = "".join(character for character in salary_text if character.isdigit() or character in ".,")
         try:
@@ -1316,16 +1327,19 @@ async def evaluate_job(job_id: UUID, triggered_by: str | None = None,
             "SELECT city, work_models, target_roles, salary_expectation, language_levels "
             "FROM candidate_profiles WHERE organization_id=:organization_id AND deleted_at IS NULL LIMIT 1"
         ), {"organization_id": org_id})).mappings().first() or {}
-        skills = [dict(row) for row in (await session.execute(text(
-            "SELECT name, level, verified, years_experience FROM skills "
-            "WHERE organization_id=:organization_id AND deleted_at IS NULL"
-        ), {"organization_id": org_id})).mappings()]
+        skills = [dict(row) for row in (await session.execute(text("""
+            SELECT s.name, s.level, s.verified, s.years_experience,
+                   (SELECT count(*) FROM skill_evidence e WHERE e.skill_id=s.id AND e.deleted_at IS NULL) AS evidence_count
+            FROM skills s WHERE s.organization_id=:organization_id AND s.deleted_at IS NULL
+        """), {"organization_id": org_id})).mappings()]
         codes = set((await session.scalars(text(
             "SELECT code FROM career_rules WHERE organization_id=:organization_id AND enabled=true AND deleted_at IS NULL"
         ), {"organization_id": org_id})).all())
 
         profile_data = dict(profile)
         profile_data["verified_skills"] = [item["name"] for item in skills if item.get("verified")]
+        profile_data["evidence_backed_skills"] = [item["name"] for item in skills
+                                                    if not item.get("verified") and (item.get("evidence_count") or 0) > 0]
         salary_text = str(profile_data.get("salary_expectation") or "")
         salary_number = "".join(character for character in salary_text if character.isdigit() or character in ".,")
         try:
