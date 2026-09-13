@@ -271,6 +271,20 @@ def test_reconciliation_backfills_the_canonical_jobs_fingerprint_for_forward_ide
     assert 'if method == "PROVIDER_ID":' in body
 
 
+def test_reconciliation_promotes_the_member_that_already_carries_the_correct_fingerprint():
+    # Achado real de producao (Prompt 9.2 - reprocessando os grupos de
+    # conflito de Application): um grupo tinha um membro mais NOVO ja
+    # ingerido com o fingerprint por provider_id (pos-fix) e um membro mais
+    # VELHO ainda com o fingerprint antigo por conteudo. group_duplicate_jobs
+    # escolhe o mais antigo como canonico por discovered_at - tentar
+    # realinhar o fingerprint desse canonico colidia (UniqueViolationError
+    # real em producao) com o valor que ja pertencia ao membro mais novo.
+    # Corrigido promovendo a canonico quem ja tem o fingerprint certo.
+    body = _route_body(_career_source(), "/jobs/reconcile-duplicates")
+    assert 'jobs_by_id[job_id].get("fingerprint") == target_fingerprint' in body
+    assert "already_correct != group[\"canonical_job_id\"]" in body
+
+
 def test_pending_evaluation_filter_excludes_duplicate_jobs():
     body = _route_body_get(_career_source(), "/jobs")
     assert "j.dedup_status != 'DUPLICATE'" in body
