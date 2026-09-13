@@ -2004,16 +2004,24 @@ async def google_mail_scheduler() -> None:
                     "last_error_at": datetime.now(UTC).isoformat(),
                 })
                 event("GOOGLE_MAIL_SCAN_FAILED", error=type(exc).__name__, consecutive_failures=consecutive_failures)
-                if consecutive_failures == GOOGLE_HEALTH_ALERT_THRESHOLD:
-                    # Secao 8 (Prompt 8): classifica a causa raiz e cria UMA
-                    # Human Intervention real (dedup por evidence.deduplication_key
-                    # - nao repete a cada novo ciclo de falha) em vez de deixar
-                    # o retry silencioso rodar para sempre (achado real do
-                    # Prompt 7.1: 159 tentativas consecutivas sem nenhum sinal
-                    # acionavel para o humano).
+                if consecutive_failures >= GOOGLE_HEALTH_ALERT_THRESHOLD:
+                    # Secao 8 (Prompt 8): classifica a causa raiz e cria uma
+                    # Human Intervention real em vez de deixar o retry
+                    # silencioso rodar para sempre (achado real do Prompt 7.1:
+                    # 159+ tentativas consecutivas sem nenhum sinal acionavel
+                    # para o humano). Usa >= (nao ==) de proposito: um outage
+                    # que ja estava acima do threshold ANTES deste deploy
+                    # (consecutive_failures persiste em disco entre restarts)
+                    # nunca voltaria a cruzar o valor exato do threshold -
+                    # bug real encontrado na validacao em producao deste
+                    # prompt (outage do Gmail ja em 165 falhas consecutivas).
+                    # A duplicacao de intervencao e evitada pelo dedup do
+                    # proprio Core (evidence.deduplication_key + status=PENDING),
+                    # nao por este gate.
                     root_cause = classify_gmail_auth_failure_root_cause(type(exc).__name__, error_detail)
-                    event("GOOGLE_MAIL_AUTH_BROKEN", error=type(exc).__name__,
-                          consecutive_failures=consecutive_failures, root_cause=root_cause)
+                    if consecutive_failures == GOOGLE_HEALTH_ALERT_THRESHOLD:
+                        event("GOOGLE_MAIL_AUTH_BROKEN", error=type(exc).__name__,
+                              consecutive_failures=consecutive_failures, root_cause=root_cause)
                     if classify_gmail_health(True, consecutive_failures, type(exc).__name__) == "AUTH_REQUIRED":
                         await asyncio.to_thread(_create_gmail_reauth_intervention, root_cause)
         await asyncio.sleep(600)
