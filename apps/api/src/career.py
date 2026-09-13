@@ -13,7 +13,8 @@ from sqlalchemy import text
 
 from .database import SessionLocal
 from .auth import require_admin
-from .quality import MINIMUM_ACCEPTABLE_SALARY_BRL, job_fingerprint, match_radars, normalize, score_job, transition_allowed
+from .job_identity import canonical_job_fingerprint, group_duplicate_jobs
+from .quality import MINIMUM_ACCEPTABLE_SALARY_BRL, match_radars, normalize, score_job, transition_allowed
 from .action_engine import (assess_language_status, build_application_plan, classify_channel_trust,
                              classify_profile_completeness, evaluate_action_policy,
                              is_profile_completeness_sufficient, select_channel)
@@ -611,10 +612,25 @@ async def materialize_application_draft(application_id: UUID,
 
 @router.post("/jobs")
 async def ingest_job(payload: JobInput, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Fase 2, Prompt 9.1: usa canonical_job_fingerprint (job_identity.py)
+    em vez do job_fingerprint puro por conteudo. Achado real de producao -
+    o "description" raspado do LinkedIn inclui UI/sidebar volatil (contagem
+    de candidaturas, "ha X dias") que muda a cada raspagem da MESMA vaga
+    real, tornando o fingerprint por conteudo sozinho instavel para essa
+    fonte (comprovado: 1 vaga real da Zeleno Meds virou 7 linhas). Quando
+    um ID estavel do provider pode ser extraido da URL (LinkedIn/InfoJobs/
+    Catho), ele passa a ser a identidade - imune a tracking params E a
+    conteudo volatil de pagina. Sem ID extraivel, cai no fingerprint
+    semantico existente (inalterado, fallback conservador)."""
     org_id = await organization_id(slug)
-    fingerprint = job_fingerprint(payload.company, payload.title, payload.location or "", payload.description)
+    fingerprint, fingerprint_method, provider_job_id = canonical_job_fingerprint(
+        company=payload.company, title=payload.title, location=payload.location or "",
+        description=payload.description, source=payload.source, source_url=payload.source_url,
+        canonical_url=payload.canonical_url,
+    )
     values = payload.model_dump()
     values.update({"organization_id": org_id, "fingerprint": fingerprint,
+                   "external_id": payload.external_id or provider_job_id,
                    "canonical_url": payload.canonical_url or payload.source_url,
                    "language_requirements": json.dumps(payload.language_requirements),
                    "required_skills": json.dumps(payload.required_skills),
@@ -668,7 +684,80 @@ async def ingest_job(payload: JobInput, slug: str = Depends(require_admin)) -> d
                    "headline": payload.title[:300], "evidence": json.dumps({"job_fingerprint": fingerprint}),
                    "dedup_fingerprint": signal_fp})
         await session.commit()
-    return {"id": job_id, "fingerprint": fingerprint, "created": created, "deduplicated": not created}
+    return {"id": job_id, "fingerprint": fingerprint, "fingerprint_method": fingerprint_method,
+            "created": created, "deduplicated": not created}
+
+
+@router.post("/jobs/reconcile-duplicates")
+async def reconcile_duplicate_jobs(dry_run: bool = True, slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Fase 2, Prompt 9.1 - reconciliacao NAO-DESTRUTIVA de Jobs duplicados
+    (Secoes 6/7/18). dry_run=True (default, seguranca-primeiro) so relata
+    os grupos propostos - nenhuma escrita. dry_run=False executa SOMENTE
+    grupos EXACT_PROVIDER_ID/EXACT_CANONICAL_URL (job_identity.
+    group_duplicate_jobs - os 2 unicos niveis auto-mergeaveis, Secao 16),
+    e SOMENTE quando no maximo 1 job do grupo tem uma Application real
+    vinculada (Secao 7 - nunca fundir 2 candidaturas reais sem prova).
+    Nenhuma linha e deletada; nenhuma FK de applications/job_scores/
+    decision_inbox/opportunities e repontada - so jobs.dedup_status/
+    canonical_job_id sao escritos, e a Opportunity nao-canonica (se
+    existir) recebe uma marca auditavel em evidence, nunca um status
+    fabricado (Secao 8). Idempotente: rodar de novo so agrupa Jobs ainda
+    'CANONICAL' - grupos ja reconciliados nunca sao reprocessados."""
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        rows = [dict(row) for row in (await session.execute(text("""
+            SELECT id, source, source_url, canonical_url, company_id, title, location, discovered_at
+            FROM jobs WHERE organization_id=:organization_id AND deleted_at IS NULL AND dedup_status='CANONICAL'
+        """), {"organization_id": org_id})).mappings()]
+        jobs = [{**row, "id": str(row["id"]), "company_id": str(row["company_id"]) if row["company_id"] else None}
+                for row in rows]
+
+        grouping = group_duplicate_jobs(jobs)
+        applied: list[dict] = []
+        rejected: list[dict] = []
+        for group in grouping["auto_mergeable"]:
+            all_ids = [group["canonical_job_id"], *group["duplicate_job_ids"]]
+            jobs_with_applications = []
+            for job_id in all_ids:
+                count = await session.scalar(text(
+                    "SELECT count(*) FROM applications WHERE job_id=:job_id AND organization_id=:organization_id"
+                ), {"job_id": job_id, "organization_id": org_id})
+                if count:
+                    jobs_with_applications.append(job_id)
+            if len(jobs_with_applications) > 1:
+                rejected.append({**group, "reason": "MULTIPLE_JOBS_WITH_REAL_APPLICATIONS",
+                                  "jobs_with_applications": jobs_with_applications})
+                continue
+
+            if not dry_run:
+                canonical_opportunity_id = await session.scalar(text(
+                    "SELECT id FROM opportunities WHERE job_id=:job_id AND organization_id=:organization_id"
+                ), {"job_id": group["canonical_job_id"], "organization_id": org_id})
+                for duplicate_id in group["duplicate_job_ids"]:
+                    await session.execute(text("""
+                        UPDATE jobs SET dedup_status='DUPLICATE', canonical_job_id=:canonical_job_id, updated_at=now()
+                        WHERE id=:duplicate_id AND organization_id=:organization_id
+                    """), {"canonical_job_id": group["canonical_job_id"], "duplicate_id": duplicate_id,
+                           "organization_id": org_id})
+                    await session.execute(text("""
+                        UPDATE opportunities SET evidence = evidence || CAST(:evidence AS jsonb), updated_at=now()
+                        WHERE job_id=:duplicate_id AND organization_id=:organization_id
+                    """), {"duplicate_id": duplicate_id, "organization_id": org_id,
+                           "evidence": json.dumps({"reconciliation": {
+                               "duplicate_of_job_id": group["canonical_job_id"],
+                               "duplicate_of_opportunity_id": (str(canonical_opportunity_id)
+                                                                if canonical_opportunity_id else None),
+                               "confidence": group["confidence"],
+                           }})})
+            applied.append(group)
+        if not dry_run:
+            await session.commit()
+    return {
+        "dry_run": dry_run,
+        "confirmed_duplicate_groups": applied,
+        "false_merge_candidates_rejected": rejected,
+        "semantic_only_reported_not_merged": grouping["semantic_only"],
+    }
 
 
 @router.get("/jobs")
@@ -683,7 +772,10 @@ async def list_jobs(limit: int = 100, pending_evaluation: bool = False,
     extra_where = ""
     order_by = "j.discovered_at DESC"
     if pending_evaluation:
-        extra_where = ("AND j.company_id IS NOT NULL "
+        # Fase 2, Prompt 9.1, Secao 12: um Job marcado DUPLICATE nunca deve
+        # produzir uma nova Opportunity - a vaga real ja tem (ou tera) sua
+        # Opportunity canonica atraves do job canonico do grupo.
+        extra_where = ("AND j.company_id IS NOT NULL AND j.dedup_status != 'DUPLICATE' "
                        "AND NOT EXISTS (SELECT 1 FROM opportunities o WHERE o.job_id=j.id)")
         order_by = "j.discovered_at ASC"
     query = text(f"""
