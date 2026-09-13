@@ -671,16 +671,29 @@ async def ingest_job(payload: JobInput, slug: str = Depends(require_admin)) -> d
 
 
 @router.get("/jobs")
-async def list_jobs(limit: int = 100, slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+async def list_jobs(limit: int = 100, pending_evaluation: bool = False,
+                     slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    """pending_evaluation (Fase 2, Prompt 8): checkpoint da Opportunity
+    Assembly - "pendente" e derivado 100% do estado persistido (nenhuma
+    Opportunity ainda referencia este Job), nunca de um watermark/cursor
+    em memoria que possa se perder num restart. Comportamento padrao
+    (pending_evaluation=False) inalterado - nenhum caller existente e afetado."""
     org_id = await organization_id(slug)
-    query = text("""
+    extra_where = ""
+    order_by = "j.discovered_at DESC"
+    if pending_evaluation:
+        extra_where = ("AND j.company_id IS NOT NULL "
+                       "AND NOT EXISTS (SELECT 1 FROM opportunities o WHERE o.job_id=j.id)")
+        order_by = "j.discovered_at ASC"
+    query = text(f"""
         SELECT j.id, j.title, c.name AS company, j.canonical_url, j.location, j.country,
                j.work_model, j.seniority, j.validation_status AS status, j.discovered_at,
                s.total AS score, s.decision AS recommendation
         FROM jobs j JOIN companies c ON c.id=j.company_id
         LEFT JOIN LATERAL (SELECT total, decision FROM job_scores WHERE job_id=j.id ORDER BY created_at DESC LIMIT 1) s ON true
         WHERE j.organization_id=:organization_id AND j.deleted_at IS NULL
-        ORDER BY j.discovered_at DESC LIMIT :limit
+          {extra_where}
+        ORDER BY {order_by} LIMIT :limit
     """)
     async with SessionLocal() as session:
         rows = (await session.execute(query, {"organization_id": org_id, "limit": min(max(limit, 1), 500)})).mappings()
@@ -1058,7 +1071,8 @@ async def _has_prior_interaction(session, org_id: UUID, company_id: UUID) -> boo
 
 
 @router.post("/jobs/{job_id}/evaluate")
-async def evaluate_job(job_id: UUID, slug: str = Depends(require_admin)) -> dict[str, Any]:
+async def evaluate_job(job_id: UUID, triggered_by: str | None = None,
+                        slug: str = Depends(require_admin)) -> dict[str, Any]:
     """Opportunity Brain (Fase 2, Prompt 4) - Job -> Opportunity (Secao 21).
     Reusa Score V2 (score_job) como fonte de eligibility/fit tecnico -
     nao recria um segundo score redundante (Secao 16, decisao A). Idempotente
@@ -1128,6 +1142,14 @@ async def evaluate_job(job_id: UUID, slug: str = Depends(require_admin)) -> dict
             return {**decision.as_dict(), "opportunity_id": existing["id"], "created": False}
 
         status = _DECISION_TO_OPPORTUNITY_STATUS[decision.decision]
+        # triggered_by (Fase 2, Prompt 8): provenance de QUEM chamou esta
+        # avaliacao - nao existe hoje nenhum caller humano/UI desta rota em
+        # producao, mas gravar isso na evidence (jsonb, sem migration) torna
+        # a autonomia auditavel por consulta direta, nunca por suposicao.
+        evidence_payload: dict[str, Any] = {"brain": decision.as_dict()}
+        if triggered_by:
+            evidence_payload["orchestration"] = {"triggered_by": triggered_by,
+                                                   "triggered_at": datetime.now(UTC).isoformat()}
         row = (await session.execute(text("""
             INSERT INTO opportunities (id, organization_id, company_id, job_id, type, status,
               discovery_source, dedup_fingerprint, evidence, fit_score, brain_confidence,
@@ -1141,7 +1163,7 @@ async def evaluate_job(job_id: UUID, slug: str = Depends(require_admin)) -> dict
               evaluated_at=now(), brain_version=EXCLUDED.brain_version, updated_at=now()
             RETURNING id, (xmax = 0) AS created
         """), {"organization_id": org_id, "company_id": job["company_id"], "job_id": job_id,
-               "status": status, "fingerprint": fingerprint, "evidence": json.dumps({"brain": decision.as_dict()}),
+               "status": status, "fingerprint": fingerprint, "evidence": json.dumps(evidence_payload),
                "fit_score": decision.fit_score, "confidence": decision.confidence,
                "brain_version": BRAIN_VERSION})).mappings().one()
         await session.commit()
@@ -1149,7 +1171,8 @@ async def evaluate_job(job_id: UUID, slug: str = Depends(require_admin)) -> dict
 
 
 @router.post("/signals/{signal_id}/evaluate")
-async def evaluate_signal(signal_id: UUID, slug: str = Depends(require_admin)) -> dict[str, Any]:
+async def evaluate_signal(signal_id: UUID, triggered_by: str | None = None,
+                           slug: str = Depends(require_admin)) -> dict[str, Any]:
     """Opportunity Brain - Signal -> Opportunity (Secao 20). So promove
     Signals TRUSTED_RESOLVED e relevantes; nunca fabrica candidatura
     espontanea automatica a partir de um Signal (Secao 30, regressao Nubank)."""
@@ -1187,6 +1210,10 @@ async def evaluate_signal(signal_id: UUID, slug: str = Depends(require_admin)) -
 
         opportunity_type = opportunity_type_for_signal(signal["type"])
         fingerprint = opportunity_fingerprint(str(signal["company_id"]), opportunity_type, None, str(signal_id))
+        evidence_payload: dict[str, Any] = {"brain": decision.as_dict()}
+        if triggered_by:
+            evidence_payload["orchestration"] = {"triggered_by": triggered_by,
+                                                   "triggered_at": datetime.now(UTC).isoformat()}
         opp_row = (await session.execute(text("""
             INSERT INTO opportunities (id, organization_id, company_id, signal_id, type, status,
               discovery_source, dedup_fingerprint, evidence, fit_score, brain_confidence,
@@ -1200,7 +1227,7 @@ async def evaluate_signal(signal_id: UUID, slug: str = Depends(require_admin)) -
             RETURNING id, (xmax = 0) AS created
         """), {"organization_id": org_id, "company_id": signal["company_id"], "signal_id": signal_id,
                "type": opportunity_type, "fingerprint": fingerprint,
-               "evidence": json.dumps({"brain": decision.as_dict()}), "confidence": decision.confidence,
+               "evidence": json.dumps(evidence_payload), "confidence": decision.confidence,
                "brain_version": BRAIN_VERSION})).mappings().one()
 
         watch_fp = watch_fingerprint(str(signal["company_id"]), str(opp_row["id"]))
