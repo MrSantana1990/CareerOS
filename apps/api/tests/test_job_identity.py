@@ -248,6 +248,19 @@ def test_m_reconciliation_route_never_calls_a_send_or_submit_function():
         assert forbidden not in body
 
 
+def test_reconciliation_backfills_the_canonical_jobs_fingerprint_for_forward_idempotency():
+    # Achado real na validacao em producao deste prompt (Secao 11): marcar
+    # as duplicatas nao basta - se o Job canonico continuar com o
+    # fingerprint ANTIGO (por conteudo), uma raspagem futura da MESMA vaga
+    # real (tracking param diferente) computaria o novo fingerprint por
+    # provider_id e nao bateria com o valor antigo, criando um Job novo em
+    # vez de reconhecer o canonico. O UPDATE do fingerprint do canonico
+    # fecha esse gap.
+    body = _route_body(_career_source(), "/jobs/reconcile-duplicates")
+    assert "UPDATE jobs SET fingerprint=:fingerprint" in body
+    assert 'if method == "PROVIDER_ID":' in body
+
+
 def test_pending_evaluation_filter_excludes_duplicate_jobs():
     body = _route_body_get(_career_source(), "/jobs")
     assert "j.dedup_status != 'DUPLICATE'" in body
