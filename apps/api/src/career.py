@@ -13,6 +13,10 @@ from sqlalchemy import text
 
 from .database import SessionLocal
 from .auth import require_admin
+from .application_semantics import (
+    AUTO_RECONCILABLE_GROUP_CLASSES, classify_application_reality, classify_group_application_conflict,
+    select_canonical_application,
+)
 from .job_identity import canonical_job_fingerprint, group_duplicate_jobs
 from .quality import MINIMUM_ACCEPTABLE_SALARY_BRL, match_radars, normalize, score_job, transition_allowed
 from .action_engine import (assess_language_status, build_application_plan, classify_channel_trust,
@@ -459,20 +463,36 @@ async def match_answer(question: str = Query(min_length=3, max_length=500), lang
     return dict(row)
 
 
+async def _fetch_job_for_prepare(session, job_id, org_id: UUID) -> dict | None:
+    row = (await session.execute(text("""
+        SELECT j.*, c.name AS company, s.total AS score, s.decision
+        FROM jobs j JOIN companies c ON c.id=j.company_id
+        LEFT JOIN LATERAL (
+          SELECT total, decision FROM job_scores WHERE job_id=j.id ORDER BY created_at DESC LIMIT 1
+        ) s ON true
+        WHERE j.id=:job_id AND j.organization_id=:organization_id AND j.deleted_at IS NULL
+    """), {"job_id": job_id, "organization_id": org_id})).mappings().first()
+    return dict(row) if row else None
+
+
 @router.post("/jobs/{job_id}/prepare")
 async def prepare_application(job_id: UUID, slug: str = Depends(require_admin)) -> dict[str, Any]:
     org_id = await organization_id(slug)
     async with SessionLocal() as session:
-        job = (await session.execute(text("""
-            SELECT j.*, c.name AS company, s.total AS score, s.decision
-            FROM jobs j JOIN companies c ON c.id=j.company_id
-            LEFT JOIN LATERAL (
-              SELECT total, decision FROM job_scores WHERE job_id=j.id ORDER BY created_at DESC LIMIT 1
-            ) s ON true
-            WHERE j.id=:job_id AND j.organization_id=:organization_id AND j.deleted_at IS NULL
-        """), {"job_id": job_id, "organization_id": org_id})).mappings().first()
+        job = await _fetch_job_for_prepare(session, job_id, org_id)
         if not job:
             raise HTTPException(status_code=404, detail="Vaga não encontrada.")
+        if job["dedup_status"] == "DUPLICATE" and job["canonical_job_id"]:
+            # Fase 2, Prompt 9.2, Secao 10: uma vaga marcada DUPLICATE
+            # (Prompt 9.1) nunca deve receber sua propria Application - a
+            # candidatura pertence ao Job canonico da mesma vaga real,
+            # nunca a uma variacao de raspagem. Resolvido ANTES do
+            # idempotency_key/existing-check abaixo, para que ambos operem
+            # sobre o job_id canonico (nunca sobre o duplicado).
+            canonical = await _fetch_job_for_prepare(session, job["canonical_job_id"], org_id)
+            if canonical:
+                job = canonical
+                job_id = job["id"]
         if job["validation_status"] != "OPEN" or not job["score"] or job["score"] < 75 or job["decision"] in {"BLOCK", "DISCARD"}:
             raise HTTPException(status_code=409, detail="Vaga não está qualificada para preparação.")
         resumes = list((await session.execute(text("""
@@ -718,17 +738,57 @@ async def reconcile_duplicate_jobs(dry_run: bool = True, slug: str = Depends(req
         rejected: list[dict] = []
         for group in grouping["auto_mergeable"]:
             all_ids = [group["canonical_job_id"], *group["duplicate_job_ids"]]
-            jobs_with_applications = []
+            # Fase 2, Prompt 9.2: APPLICATION ROW != REAL APPLICATION
+            # (Secao 3). O guard antigo (so contava linhas) rejeitava
+            # qualquer grupo onde 2+ Jobs tivessem QUALQUER Application,
+            # mesmo PREPARING/READY/ERROR - artefatos tecnicos do pipeline
+            # tradicional que nunca chegaram a acao externa. Classificar
+            # por evidencia real (status + provider_message_id +
+            # external_reference + confirmation_evidence + applied_at,
+            # nunca so o nome do status) permite reconciliar com seguranca
+            # os grupos onde nenhuma Application e de fato uma candidatura
+            # externa comprovada.
+            applications_with_reality: list[tuple[dict, str]] = []
             for job_id in all_ids:
-                count = await session.scalar(text(
-                    "SELECT count(*) FROM applications WHERE job_id=:job_id AND organization_id=:organization_id"
-                ), {"job_id": job_id, "organization_id": org_id})
-                if count:
-                    jobs_with_applications.append(job_id)
-            if len(jobs_with_applications) > 1:
-                rejected.append({**group, "reason": "MULTIPLE_JOBS_WITH_REAL_APPLICATIONS",
-                                  "jobs_with_applications": jobs_with_applications})
+                app_rows = [dict(row) for row in (await session.execute(text("""
+                    SELECT id, job_id, status, provider_message_id, external_reference,
+                           confirmation_evidence, applied_at, created_at
+                    FROM applications WHERE job_id=:job_id AND organization_id=:organization_id
+                """), {"job_id": job_id, "organization_id": org_id})).mappings()]
+                for app_row in app_rows:
+                    events = [dict(row) for row in (await session.execute(text("""
+                        SELECT to_status FROM application_events
+                        WHERE application_id=:application_id AND organization_id=:organization_id
+                    """), {"application_id": app_row["id"], "organization_id": org_id})).mappings()]
+                    applications_with_reality.append(
+                        (app_row, classify_application_reality(app_row, events)))
+
+            group_classification = classify_group_application_conflict(
+                [reality for _, reality in applications_with_reality])
+            if group_classification not in AUTO_RECONCILABLE_GROUP_CLASSES:
+                rejected.append({**group, "reason": group_classification,
+                                  "application_ids": [str(app["id"]) for app, _ in applications_with_reality]})
+                if group_classification == "MULTIPLE_REAL_APPLICATIONS" and not dry_run:
+                    # Secao 7: registrar o achado, criar UMA intervencao por
+                    # grupo (dedup por evidence.deduplication_key - nunca
+                    # uma por Application), nunca esconder duas
+                    # candidaturas externas reais para a mesma vaga.
+                    confirmed_ids = [str(app["id"]) for app, reality in applications_with_reality
+                                      if reality == "EXTERNAL_CONFIRMED"]
+                    await _create_or_reuse_intervention(session, org_id, InterventionInput(
+                        executor_id="job-reconciliation", reason="MATERIAL_UNKNOWN",
+                        title="Múltiplas candidaturas externas reais para a mesma vaga",
+                        instructions=(
+                            f"DUPLICATE_EXTERNAL_APPLICATION: {len(confirmed_ids)} Applications com evidencia "
+                            f"externa confirmada independente para o mesmo Job canonico "
+                            f"{group['canonical_job_id']}. IDs: {', '.join(confirmed_ids)}. Revisao humana "
+                            "necessaria para decidir qual candidatura e a valida."
+                        ),
+                        evidence={"deduplication_key": f"duplicate-external-application:{group['canonical_job_id']}",
+                                  "confirmed_application_ids": confirmed_ids},
+                    ))
                 continue
+            canonical_application = select_canonical_application(applications_with_reality)
 
             if not dry_run:
                 # Secao 11 (Ingest Idempotency): marcar as duplicatas nao
@@ -771,7 +831,26 @@ async def reconcile_duplicate_jobs(dry_run: bool = True, slug: str = Depends(req
                                                                 if canonical_opportunity_id else None),
                                "confidence": group["confidence"],
                            }})})
-            applied.append(group)
+                # Secao 6: a Application canonica (se existir alguma real/
+                # tentativa) nunca e alterada - so as OUTRAS ganham uma
+                # marca auditavel apontando pra ela. Nunca deleta, nunca
+                # repontea applications.job_id (RESTRICT + unique por Job).
+                if canonical_application:
+                    for app_row, _ in applications_with_reality:
+                        if app_row["id"] == canonical_application["id"]:
+                            continue
+                        await session.execute(text("""
+                            UPDATE applications
+                              SET confirmation_evidence = confirmation_evidence || CAST(:evidence AS jsonb),
+                                  updated_at=now()
+                            WHERE id=:application_id AND organization_id=:organization_id
+                        """), {"application_id": app_row["id"], "organization_id": org_id,
+                               "evidence": json.dumps({"reconciliation": {
+                                   "canonical_application_id": str(canonical_application["id"]),
+                                   "canonical_job_id": group["canonical_job_id"],
+                                   "group_classification": group_classification,
+                               }})})
+            applied.append({**group, "application_conflict": group_classification})
         if not dry_run:
             await session.commit()
     return {

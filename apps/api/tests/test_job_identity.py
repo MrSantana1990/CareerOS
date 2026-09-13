@@ -200,10 +200,15 @@ def _route_body(source: str, path: str) -> str:
     return source[start:end]
 
 
-def test_i_reconciliation_route_never_merges_when_multiple_jobs_have_real_applications():
+def test_i_reconciliation_route_never_merges_a_group_outside_the_auto_reconcilable_classes():
+    # Prompt 9.2 substitui o guard antigo (so contava linhas de
+    # Application, rejeitando 25/42 grupos reais que eram so artefatos
+    # tecnicos PREPARING/READY/ERROR) por uma classificacao de evidencia
+    # real (application_semantics.py) - so os 4 niveis seguros (Secao 5)
+    # sao executados automaticamente.
     body = _route_body(_career_source(), "/jobs/reconcile-duplicates")
-    assert "MULTIPLE_JOBS_WITH_REAL_APPLICATIONS" in body
-    assert "len(jobs_with_applications) > 1" in body
+    assert "classify_group_application_conflict(" in body
+    assert "group_classification not in AUTO_RECONCILABLE_GROUP_CLASSES" in body
 
 
 def test_reconciliation_route_defaults_to_dry_run_never_writes_by_accident():
@@ -218,14 +223,19 @@ def test_reconciliation_route_never_deletes_a_job_row():
     assert "DELETE FROM applications" not in body
 
 
-def test_j_reconciliation_never_repoints_opportunity_channels_or_applications_fk():
-    # Canal de e-mail/Action Plan da Opportunity permanecem intocados - so
-    # a evidence (jsonb) da Opportunity duplicada ganha uma marca auditavel.
+def test_j_reconciliation_never_repoints_opportunity_channels_or_applications_job_id():
+    # Canal de e-mail/Action Plan da Opportunity permanecem intocados. A
+    # Application (Prompt 9.2) so ganha uma marca auditavel em
+    # confirmation_evidence - job_id (RESTRICT + unique por Job, Secao 7)
+    # nunca e repontado em nenhuma das duas tabelas.
     body = _route_body(_career_source(), "/jobs/reconcile-duplicates")
     assert "UPDATE opportunity_channels" not in body
-    assert "UPDATE applications" not in body
     assert 'UPDATE opportunities SET evidence' in body
     assert "job_id" not in body.split("UPDATE opportunities SET evidence")[1].split("WHERE")[0]
+    assert 'UPDATE applications' in body
+    applications_set_clause = body.split("UPDATE applications")[1].split("WHERE")[0]
+    assert "job_id" not in applications_set_clause
+    assert "confirmation_evidence" in applications_set_clause
 
 
 def test_k_ingest_job_still_creates_a_job_discovered_signal_per_observation():
