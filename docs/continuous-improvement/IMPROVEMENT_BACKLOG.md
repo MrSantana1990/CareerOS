@@ -53,6 +53,15 @@ Qualquer item que não esteja listado acima e que envolva:
 
 Congelar não significa ignorar um bug real encontrado durante o trabalho nos itens acima — bug real sempre entra no ciclo (ver `README.md`), só não abre escopo novo por iniciativa própria.
 
+## Fase 2 — achados do Pilot (Prompt 7.1, 09-13/09/2026)
+
+Ver `docs/continuous-improvement/PILOT-FORENSICS.md` para a auditoria completa. Gaps comprovados por evidência real de 4 dias de produção:
+
+- [ ] **P0 — nenhum scheduler conecta Perception → Opportunity Brain → Action Engine.** 130 Signals + 96 Jobs novos autônomos no Pilot, 0 Opportunities criadas. As rotas `POST /jobs/{id}/evaluate`, `POST /signals/{id}/evaluate` e `POST /opportunities/{id}/action-plan` (Prompts 4/5/6) funcionam corretamente quando chamadas, mas nenhum `asyncio.create_task` em `startup_scheduler()` as invoca. Este é o gargalo #1 confirmado — sem ele, o "organismo vivo" nunca sai do estágio de percepção.
+- [ ] **`structured_extraction` de vagas do LinkedIn captura texto de UI/sidebar em `location`/`work_model`** (achado real: `evidence_snippet` idêntico — rótulo de filtro de busca — em vagas de empresas diferentes). Coluna populada 100%, mas parte do conteúdo extraído via `keyword_regex` sobre o texto completo da página não é confiável para essa fonte.
+- [ ] **Sistema nunca visita o feed/posts do LinkedIn**, só `/jobs/search/` e `/jobs/view/` — vagas divulgadas como post social/imagem (caso real J&T Express) são estruturalmente invisíveis, independente de QR Code/OCR.
+- [ ] **Correlação de e-mail falha quando não existe Application em Core para a empresa** (2 casos reais no Pilot: TEMBICI, GRUPO GPS — mesma causa estrutural do caso Randstad/Mercado Livre do Prompt 6).
+
 ## Definição de "resolvido" para este backlog
 
 Um item só sai daqui quando o `CURRENT_STATE.md` for atualizado com evidência real do resultado — nunca só porque o código foi implantado. Ver o template de ciclo em `README.md`.
