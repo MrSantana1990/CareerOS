@@ -50,6 +50,14 @@ jobs:
           cache-dependency-path: apps/api/pyproject.toml
       - run: pip install -e "apps/api[dev]"
       - run: pip install -e "apps/worker[dev]"
+      # Recuperação operacional do Gmail: os testes de OAuth exercitam
+      # google.oauth2.credentials/google.auth de verdade (nunca contra a
+      # rede - Credentials.refresh é sempre mockado). Instala só os 3
+      # pacotes google-* (leves, sem binário nativo) já declarados em
+      # apps/automation-host/pyproject.toml - nunca o pacote completo
+      # (evita puxar playwright/Pillow/pyzbar, que exigem binários
+      # nativos/download de browser não necessários para estes testes).
+      - run: pip install "google-api-python-client>=2.180,<3" "google-auth-httplib2>=0.2,<1" "google-auth-oauthlib>=1.2,<2"
       - run: ruff check apps/api apps/worker apps/automation-host
       - run: pytest apps/api/tests -q
       - run: pytest apps/automation-host/tests -q
