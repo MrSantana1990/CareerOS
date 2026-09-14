@@ -29,8 +29,20 @@ from .quality import job_fingerprint, normalize
 # Secao 1) - so os 3 providers que realmente existem hoje (Secao 4: "nao
 # criar framework para ATS ainda inexistentes"). Cada padrao extrai
 # somente um ID JA PRESENTE na URL - nunca deriva/adivinha nada.
+#
+# Achado real (Evidence Resolution Sprint): o LinkedIn publica a MESMA vaga
+# sob duas formas de URL - `/jobs/view/<id>` (busca) e
+# `/jobs/view/<slug-descritivo>-<id>` (pagina publica/compartilhamento,
+# ex.: `.../engenheiro-de-dados-senior-campinas-sp-at-agibank-4362345837`).
+# O padrao antigo (`/jobs/view/(\d+)`) so casava a primeira forma - a
+# segunda caia para o fingerprint semantico (CONTENT_FINGERPRINT), que
+# nunca bate com o PROVIDER_ID da mesma vaga raspada pela outra URL,
+# duplicando a vaga real em duas linhas CANONICAL. O padrao corrigido
+# aceita um slug opcional antes do ID (nunca casa digitos soltos de
+# tracking - exige 6+ digitos imediatamente antes de "/", "?", "#" ou fim
+# da string, o tamanho real de um Job ID do LinkedIn).
 _PROVIDER_ID_PATTERNS = {
-    "linkedin": re.compile(r"/jobs/view/(\d+)"),
+    "linkedin": re.compile(r"/jobs/view/[^/?#]*?(\d{6,})(?:[/?#]|$)"),
     "infojobs": re.compile(r"__(\d+)\.aspx"),
     "catho": re.compile(r"/vagas/[^/?#]+/(\d+)"),
 }
