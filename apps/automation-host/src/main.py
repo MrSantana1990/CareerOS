@@ -2013,8 +2013,13 @@ def _resolve_gmail_reauth_intervention() -> None:
     if not CAREER_ADMIN_TOKEN:
         return
     try:
+        # dedup_key filtra no servidor (Secao 17/6) - a listagem padrao
+        # de /interventions e limitada a 100 linhas mais recentes; uma
+        # intervencao antiga (como esta, aberta ha dias) ficaria enterrada
+        # atras de outras mais novas e nunca seria encontrada so por
+        # paginacao (achado real, corrigido junto com este fix).
         request = Request(
-            CAREER_API_URL + "/api/v1/interventions?status=PENDING",
+            CAREER_API_URL + "/api/v1/interventions?status=PENDING&dedup_key=gmail%3Aoauth_reauthorization_required",
             headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}"},
         )
         with urlopen(request, timeout=20) as response:
