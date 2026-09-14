@@ -27,10 +27,21 @@ class Settings(BaseSettings):
     admin_api_token: str = ""
     default_organization_slug: str = "rodolfo"
     cors_origins: str = "http://localhost:3000"
+    # Google Sign-In - allowlist obrigatoria (Secao 5/12): sem ela, NENHUM
+    # e-mail passa - fail-closed, nunca fail-open. Impede que qualquer
+    # conta Google vire um usuario novo com acesso ao mesmo painel/dados
+    # compartilhados (achado real: o usuario perguntou "qualquer pessoa
+    # ja pode ter acesso?" apos o primeiro login real funcionar, e a
+    # resposta honesta era sim, sem isto).
+    google_login_allowed_emails: str = ""
 
     @property
     def allowed_origins(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def google_login_allowlist(self) -> set[str]:
+        return {email.strip().lower() for email in self.google_login_allowed_emails.split(",") if email.strip()}
 
     @property
     def effective_auto_apply_enabled(self) -> bool:

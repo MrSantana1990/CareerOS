@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from .database import SessionLocal
 from .auth import require_admin
+from .config import get_settings
 from .application_semantics import (
     AUTO_RECONCILABLE_GROUP_CLASSES, classify_application_reality, classify_group_application_conflict,
     select_canonical_application,
@@ -1877,6 +1878,14 @@ async def upsert_google_identity(payload: GoogleIdentityInput,
     multiuser, sem multi-tenant completo agora)."""
     if not payload.email_verified:
         raise HTTPException(status_code=422, detail="E-mail do Google não verificado.")
+    # Allowlist obrigatoria (fail-closed) - achado real: sem isto, QUALQUER
+    # conta Google com e-mail verificado ganhava acesso automatico ao
+    # mesmo painel/dados compartilhados (nao ha isolamento por usuario
+    # ainda, Secao 12). Checada em TODO login, nao so na criacao de
+    # usuario novo - se um e-mail for removido da allowlist depois, a
+    # conta ja vinculada tambem para de conseguir entrar.
+    if payload.email.strip().lower() not in get_settings().google_login_allowlist:
+        raise HTTPException(status_code=403, detail="E-mail não autorizado a entrar no CareerOS.")
     org_id = await organization_id(slug)
     async with SessionLocal() as session:
         existing_by_subject = await session.scalar(text("""
