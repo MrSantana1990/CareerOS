@@ -9,7 +9,7 @@ dias", vagas similares no rodape)."""
 from pathlib import Path
 
 from src.job_identity import (
-    canonical_job_fingerprint, classify_duplicate_confidence, extract_provider_job_id,
+    PROVIDER_ID_METHOD, canonical_job_fingerprint, classify_duplicate_confidence, extract_provider_job_id,
     group_duplicate_jobs, is_auto_mergeable,
 )
 
@@ -76,6 +76,40 @@ def test_c_extract_provider_job_id_infojobs_and_catho():
     assert extract_provider_job_id("Catho",
         "https://www.catho.com.br/vagas/analista-de-suporte-informatica-sao-paulo-sp/38017389") == "38017389"
     assert extract_provider_job_id("linkedin", "https://www.linkedin.com/jobs/view/4459952895/") == "4459952895"
+
+
+# D: achado real (Evidence Resolution Sprint) - LinkedIn publica a MESMA vaga sob duas formas de URL
+# (busca: /jobs/view/<id> ; pagina publica/compartilhamento: /jobs/view/<slug>-<id>) - o caso real
+# encontrado foi "Engenheiro de Dados Senior - Campinas/SP" na Agibank, virando duas linhas CANONICAL
+# distintas porque so a primeira forma extraia o provider_job_id. ------------------------------------
+
+def test_d_linkedin_seo_slug_url_variant_extracts_the_same_provider_id_as_the_plain_form():
+    plain_url = "https://www.linkedin.com/jobs/view/4362345837/?eBP=CwEAAAGgLoJLJlhz"
+    slug_url = ("https://br.linkedin.com/jobs/view/engenheiro-de-dados-s%C3%AAnior-campinas-sp-at-agibank"
+                "-4362345837?position=7&pageNum=0")
+    assert extract_provider_job_id("linkedin", plain_url) == "4362345837"
+    assert extract_provider_job_id("linkedin", slug_url) == "4362345837"
+
+
+def test_d_agibank_regression_both_url_variants_produce_the_same_fingerprint():
+    plain_url = "https://www.linkedin.com/jobs/view/4362345837/?eBP=CwEAAAGgLoJLJlhz"
+    slug_url = ("https://br.linkedin.com/jobs/view/engenheiro-de-dados-s%C3%AAnior-campinas-sp-at-agibank"
+                "-4362345837?position=7&pageNum=0")
+    fp_plain, method_plain, id_plain = canonical_job_fingerprint(
+        company="Agibank", title="Engenheiro de Dados Sênior - Campinas/SP", location="Campinas e região",
+        description="dump de pagina volatil A", source="linkedin", canonical_url=plain_url)
+    fp_slug, method_slug, id_slug = canonical_job_fingerprint(
+        company="Agibank", title="Engenheiro de Dados Sênior - Campinas/SP", location="Campinas e região",
+        description="dump de pagina volatil B - completamente diferente do outro", source="linkedin",
+        canonical_url=slug_url)
+    assert method_plain == method_slug == PROVIDER_ID_METHOD
+    assert id_plain == id_slug == "4362345837"
+    assert fp_plain == fp_slug
+
+
+def test_d_linkedin_regex_never_matches_short_tracking_numbers_as_a_job_id():
+    # so IDs de 6+ digitos - nunca confunde um numero curto de tracking/paginacao com o Job ID real.
+    assert extract_provider_job_id("linkedin", "https://www.linkedin.com/jobs/view/slug-at-empresa-42?position=1") is None
 
 
 def test_unknown_source_never_extracts_an_id():
