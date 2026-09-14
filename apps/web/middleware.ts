@@ -10,6 +10,12 @@ export async function middleware(request: NextRequest) {
     const secureUrl = new URL(`${request.nextUrl.pathname}${request.nextUrl.search}`, `https://${publicHost}`);
     return NextResponse.redirect(secureUrl, 308);
   }
+  // Páginas públicas exigidas pelo Google OAuth Branding (política de
+  // privacidade/termos de uso) - nunca exigem sessão, nunca redirecionam
+  // para /login, independente de estar autenticado ou não.
+  if (request.nextUrl.pathname === "/privacy" || request.nextUrl.pathname === "/terms") {
+    return NextResponse.next();
+  }
   const secret = process.env.PORTAL_SESSION_SECRET ?? "";
   const authenticated = await validSession(request.cookies.get(SESSION_COOKIE)?.value, secret);
   if (request.nextUrl.pathname === "/login") {
