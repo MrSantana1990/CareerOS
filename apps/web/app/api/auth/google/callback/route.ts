@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSession, SESSION_COOKIE } from "../../../../../lib/portal-auth";
 import { exchangeCodeForGoogleIdentity, GoogleLoginError, type GoogleLoginAttempt } from "../../../../../lib/google-oidc";
+import { publicUrl } from "../../../../../lib/public-url";
 
 const PENDING_COOKIE = "google_oauth_pending";
 
@@ -26,7 +27,11 @@ async function upsertGoogleUser(identity: { sub: string; email: string; emailVer
 }
 
 export async function GET(request: NextRequest) {
-  const loginPage = new URL("/login", request.url);
+  // NUNCA construir a URL de redirect a partir de request.url diretamente
+  // aqui - numa Route Handler self-hosted ele reflete o bind interno do
+  // processo (0.0.0.0:3000), nao o dominio publico (achado real em
+  // producao - ver lib/public-url.ts).
+  const loginPage = publicUrl("/login", request);
   const clientId = process.env.GOOGLE_LOGIN_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_LOGIN_CLIENT_SECRET;
   const redirectUri = process.env.GOOGLE_LOGIN_REDIRECT_URI;
@@ -70,7 +75,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.redirect(loginPage);
     }
     const user = await upsertGoogleUser(identity);
-    const target = new URL(attempt.next, request.url);
+    const target = publicUrl(attempt.next, request);
     const response = NextResponse.redirect(target);
     response.cookies.set(SESSION_COOKIE, await createSession(user.email, sessionSecret, {
       authProvider: "GOOGLE",
