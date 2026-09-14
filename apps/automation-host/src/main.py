@@ -45,7 +45,7 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 from .google_career import (check_application_thread, connection_status,
                             create_application_email_draft, create_calendar_event,
-                            create_reply_draft, mark_questionnaire_complete,
+                            create_reply_draft, credential_storage_health, mark_questionnaire_complete,
                             scan_recruitment_mail, send_application_email, send_security_code)
 from .reply_tracking import follow_up_status
 
@@ -2001,6 +2001,40 @@ def _create_gmail_reauth_intervention(root_cause: str) -> None:
         event("GMAIL_REAUTH_INTERVENTION_FAILED", error=type(exc).__name__)
 
 
+def _resolve_gmail_reauth_intervention() -> None:
+    """Fase 2 - Gmail Recovery, Secao 17: fecha de forma auditavel a
+    intervencao aberta por _create_gmail_reauth_intervention quando o
+    scan volta a funcionar (nunca apaga historico - so marca RESOLVED via
+    a mesma rota /interventions/{id}/resolve ja usada pelo restante do
+    sistema). Idempotente por construcao: se nao houver intervencao
+    PENDING com o dedup_key esperado, simplesmente nao faz nada (nunca
+    lanca excecao) - chamar isto de novo apos ja resolvido e sempre
+    seguro."""
+    if not CAREER_ADMIN_TOKEN:
+        return
+    try:
+        request = Request(
+            CAREER_API_URL + "/api/v1/interventions?status=PENDING",
+            headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}"},
+        )
+        with urlopen(request, timeout=20) as response:
+            pending = json.loads(response.read().decode("utf-8"))
+        match = next((item for item in pending
+                     if (item.get("evidence") or {}).get("deduplication_key")
+                     == "gmail:oauth_reauthorization_required"), None)
+        if not match:
+            return
+        resolve_request = Request(
+            CAREER_API_URL + f"/api/v1/interventions/{match['id']}/resolve",
+            data=json.dumps({"resolution": "RESOLVED"}).encode("utf-8"), method="POST",
+            headers={"Authorization": f"Bearer {CAREER_ADMIN_TOKEN}", "Content-Type": "application/json"},
+        )
+        urlopen(resolve_request, timeout=20)
+        event("GMAIL_REAUTH_INTERVENTION_RESOLVED", intervention_id=match["id"])
+    except Exception as exc:
+        event("GMAIL_REAUTH_INTERVENTION_RESOLVE_FAILED", error=type(exc).__name__)
+
+
 async def google_mail_scheduler() -> None:
     await asyncio.sleep(20)
     while True:
@@ -2027,37 +2061,54 @@ async def google_mail_scheduler() -> None:
                 await sync_communications_to_core(result["items"])
                 if health.get("consecutive_failures", 0) >= GOOGLE_HEALTH_ALERT_THRESHOLD:
                     event("GOOGLE_MAIL_RECOVERED", after_failures=health["consecutive_failures"])
+                    # Recuperacao operacional do Gmail, Secao 17: fecha a
+                    # intervencao aberta pelo outage anterior de forma
+                    # auditavel (nunca apaga historico) assim que o scan
+                    # volta a funcionar de verdade - nunca deixa AUTH_REQUIRED
+                    # aberto indefinidamente apos a causa real ja ter sido
+                    # corrigida.
+                    await asyncio.to_thread(_resolve_gmail_reauth_intervention)
                 save_json(GOOGLE_HEALTH, {
                     "consecutive_failures": 0,
                     "last_success_at": datetime.now(UTC).isoformat(),
                     "last_error": None,
+                    "root_cause": None,
                 })
             except Exception as exc:
                 consecutive_failures = health.get("consecutive_failures", 0) + 1
                 error_detail = str(exc)[:300]
+                # Recuperacao operacional do Gmail, Secao 16: a causa raiz
+                # precisa estar disponivel a qualquer momento via
+                # /google/status e /metrics (AUTH_FAILURE_CLASS), nao so
+                # uma vez no log de eventos quando o contador cruza o
+                # threshold - por isso e sempre calculada e persistida
+                # aqui, independente do gate abaixo (que so decide quando
+                # CRIAR a Human Intervention).
+                root_cause = classify_gmail_auth_failure_root_cause(type(exc).__name__, error_detail)
                 save_json(GOOGLE_HEALTH, {
                     "consecutive_failures": consecutive_failures,
                     "last_success_at": health.get("last_success_at"),
                     "last_error": type(exc).__name__,
                     "last_error_detail": error_detail,
                     "last_error_at": datetime.now(UTC).isoformat(),
+                    "root_cause": root_cause,
                 })
                 event("GOOGLE_MAIL_SCAN_FAILED", error=type(exc).__name__, consecutive_failures=consecutive_failures)
                 if consecutive_failures >= GOOGLE_HEALTH_ALERT_THRESHOLD:
-                    # Secao 8 (Prompt 8): classifica a causa raiz e cria uma
-                    # Human Intervention real em vez de deixar o retry
-                    # silencioso rodar para sempre (achado real do Prompt 7.1:
-                    # 159+ tentativas consecutivas sem nenhum sinal acionavel
-                    # para o humano). Usa >= (nao ==) de proposito: um outage
-                    # que ja estava acima do threshold ANTES deste deploy
+                    # Secao 8 (Prompt 8): cria uma Human Intervention real em
+                    # vez de deixar o retry silencioso rodar para sempre
+                    # (achado real do Prompt 7.1: 159+ tentativas
+                    # consecutivas sem nenhum sinal acionavel para o
+                    # humano). Usa >= (nao ==) de proposito: um outage que ja
+                    # estava acima do threshold ANTES deste deploy
                     # (consecutive_failures persiste em disco entre restarts)
                     # nunca voltaria a cruzar o valor exato do threshold -
-                    # bug real encontrado na validacao em producao deste
-                    # prompt (outage do Gmail ja em 165 falhas consecutivas).
-                    # A duplicacao de intervencao e evitada pelo dedup do
-                    # proprio Core (evidence.deduplication_key + status=PENDING),
-                    # nao por este gate.
-                    root_cause = classify_gmail_auth_failure_root_cause(type(exc).__name__, error_detail)
+                    # bug real encontrado na validacao em producao do
+                    # Prompt 8 (outage do Gmail ja em 165 falhas
+                    # consecutivas). A duplicacao de intervencao e evitada
+                    # pelo dedup do proprio Core
+                    # (evidence.deduplication_key + status=PENDING), nao por
+                    # este gate.
                     if consecutive_failures == GOOGLE_HEALTH_ALERT_THRESHOLD:
                         event("GOOGLE_MAIL_AUTH_BROKEN", error=type(exc).__name__,
                               consecutive_failures=consecutive_failures, root_cause=root_cause)
@@ -2128,6 +2179,8 @@ async def get_metrics() -> dict[str, object]:
         "google_mail_last_success_at": google_health.get("last_success_at"),
         "gmail_health": classify_gmail_health(GOOGLE_TOKEN.exists(), google_health.get("consecutive_failures", 0),
                                                google_health.get("last_error")),
+        "auth_failure_class": google_health.get("root_cause"),
+        "credential_storage_health": credential_storage_health(GOOGLE_TOKEN),
         "opportunity_assembly": opportunity_assembly_health,
     }
 
@@ -2179,8 +2232,13 @@ async def core_sync_requeue(idempotency_key: str) -> dict:
 @app.get("/google/status")
 async def google_status() -> dict:
     items = load_json(GOOGLE_INBOX, [])
+    # Secao 16 (Recuperacao operacional do Gmail) - saude do
+    # armazenamento de credencial exposta em toda resposta deste
+    # endpoint, sem nunca incluir o conteudo do token em si.
+    storage_health = credential_storage_health(GOOGLE_TOKEN)
     if not GOOGLE_TOKEN.exists():
-        return {"connected": False, "email": None, "calendar": False, "alerts": 0, "last_items": items[:20]}
+        return {"connected": False, "email": None, "calendar": False, "alerts": 0, "last_items": items[:20],
+                "credential_storage_health": storage_health}
     cached = load_json(GOOGLE_STATUS_CACHE, {})
     checked_at = cached.get("checked_at")
     if checked_at:
@@ -2189,6 +2247,7 @@ async def google_status() -> dict:
             if age.total_seconds() < 600:
                 cached["alerts"] = len([item for item in items if item.get("status") == "NEW"])
                 cached["last_items"] = items[:20]
+                cached["credential_storage_health"] = storage_health
                 return cached
         except (TypeError, ValueError):
             pass
@@ -2198,6 +2257,7 @@ async def google_status() -> dict:
         save_json(GOOGLE_STATUS_CACHE, status)
         status["alerts"] = len([item for item in items if item.get("status") == "NEW"])
         status["last_items"] = items[:20]
+        status["credential_storage_health"] = storage_health
         return status
     except Exception as exc:
         # A checagem ao vivo falhou agora - nunca reportar connected=true com base em
@@ -2205,6 +2265,8 @@ async def google_status() -> dict:
         health = load_json(GOOGLE_HEALTH, {})
         return {
             "connected": False,
+            "credential_storage_health": storage_health,
+            "auth_failure_class": health.get("root_cause"),
             "email": cached.get("email"),
             "calendar": False,
             "error": type(exc).__name__,
