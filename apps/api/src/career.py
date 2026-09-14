@@ -2722,7 +2722,7 @@ async def list_interventions(status: str = Query(default="PENDING"),
                    instructions, page_url, evidence, created_at, resolved_at, resolution
             FROM human_interventions
             WHERE organization_id=:organization_id AND (:status='ALL' OR status=:status)
-              AND (:dedup_key IS NULL OR evidence->>'deduplication_key' = :dedup_key)
+              AND (CAST(:dedup_key AS text) IS NULL OR evidence->>'deduplication_key' = CAST(:dedup_key AS text))
             ORDER BY CASE status WHEN 'PENDING' THEN 1 ELSE 2 END, created_at DESC LIMIT 100
         """), {"organization_id": org_id, "status": status, "dedup_key": dedup_key})).mappings()
     return [dict(row) for row in rows]

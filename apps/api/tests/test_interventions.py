@@ -45,5 +45,10 @@ def test_list_interventions_supports_exact_dedup_key_filter():
     end = source.index("\n@router.get", start + 1)
     body = source[start:end]
     assert "dedup_key: str | None = Query" in body
-    assert "evidence->>'deduplication_key' = :dedup_key" in body
+    # CAST explicito e obrigatorio - achado real em producao:
+    # AmbiguousParameterError do asyncpg quando o mesmo parametro
+    # aparece so em "IS NULL" e numa comparacao de texto sem tipo
+    # explicito, sem NENHUM outro uso que ancore seu tipo.
+    assert "CAST(:dedup_key AS text) IS NULL" in body
+    assert "evidence->>'deduplication_key' = CAST(:dedup_key AS text)" in body
     assert '"dedup_key": dedup_key' in body
