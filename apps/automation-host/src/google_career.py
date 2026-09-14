@@ -1,6 +1,8 @@
 import base64
 import json
+import os
 import re
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
@@ -10,6 +12,8 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
+from google.auth.exceptions import RefreshError
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError as GoogleHttpError
@@ -23,9 +27,109 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
 ]
 
+# Recuperacao operacional do Gmail (auditoria: nenhum refresh era
+# persistido de volta no disco - o access token renovado (e um eventual
+# refresh_token novo, se o Google decidir rotacionar) so vivia em memoria
+# e desaparecia a cada novo _credentials(), que sempre recarrega do
+# arquivo). Um unico processo (uvicorn sem --workers) e todas as chamadas
+# passam por _credentials(), entao um threading.Lock in-process e
+# suficiente - nao ha segundo processo/container escrevendo neste arquivo
+# (auditado: so scripts/authorize-google.py, rodado manualmente fora do
+# container, escreve o token inicial).
+_CREDENTIAL_REFRESH_LOCK = threading.Lock()
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    """Escrita atomica (tmp + os.replace) - nunca deixa o arquivo de
+    credencial num estado parcial/corrompido se o processo for encerrado
+    (restart, deploy, OOM) no meio da escrita."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def _refresh_health_path(token_path: Path) -> Path:
+    return token_path.parent / "refresh-health.json"
+
+
+def _record_refresh_health(token_path: Path, **fields: object) -> None:
+    """Metadado de observabilidade (Secao 16) - nunca a fonte canonica da
+    credencial (essa continua sendo so token_path, Secao 5). Nunca grava
+    valor de token/secret aqui, so status/timestamps/nome de classe de
+    erro."""
+    health_path = _refresh_health_path(token_path)
+    existing: dict = {}
+    if health_path.exists():
+        try:
+            existing = json.loads(health_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    existing.update(fields)
+    _write_json_atomic(health_path, existing)
+
+
+def credential_storage_health(token_path: Path) -> dict:
+    """Fase 2 - Gmail Recovery, Secao 16 - saude do armazenamento de
+    credencial SEM NUNCA expor client_secret/refresh_token/access_token,
+    nem no retorno nem em log algum. So booleanos/timestamps/nomes de
+    classe de erro."""
+    if not token_path.exists():
+        return {"credential_file_present": False, "has_refresh_token": False,
+                "scopes_match": False, "last_successful_refresh_at": None,
+                "last_refresh_attempted_at": None, "last_refresh_error": None}
+    try:
+        stored = json.loads(token_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        stored = {}
+    health = {}
+    health_path = _refresh_health_path(token_path)
+    if health_path.exists():
+        try:
+            health = json.loads(health_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            health = {}
+    return {
+        "credential_file_present": True,
+        "has_refresh_token": bool(stored.get("refresh_token")),
+        "scopes_match": set(stored.get("scopes") or []) == set(SCOPES),
+        "last_successful_refresh_at": health.get("last_successful_refresh_at"),
+        "last_refresh_attempted_at": health.get("last_refresh_attempted_at"),
+        "last_refresh_error": health.get("last_refresh_error"),
+    }
+
 
 def _credentials(token_path: Path) -> Credentials:
-    return Credentials.from_authorized_user_file(str(token_path), SCOPES)
+    """Fonte canonica unica da credencial (Secao 5): so este arquivo.
+    Se o access token estiver expirado e houver refresh_token, o refresh
+    e feito EXPLICITAMENTE aqui (nao deixado implicito dentro do
+    transporte HTTP do googleapiclient) para que o resultado - access
+    token novo e, se o Google decidir rotacionar, um refresh_token novo -
+    seja persistido de volta no MESMO arquivo, de forma atomica e
+    protegida por lock (Secao 4/6/7). Credentials.refresh() da biblioteca
+    google-auth so substitui refresh_token quando o Google devolve um
+    novo; caso contrario preserva o already-loaded - nunca apagamos um
+    refresh_token valido aqui."""
+    credentials = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+    if not credentials.expired or not credentials.refresh_token:
+        return credentials
+    with _CREDENTIAL_REFRESH_LOCK:
+        # Outra thread pode ja ter renovado e persistido enquanto
+        # esperavamos o lock - recarrega do disco antes de decidir que um
+        # novo refresh e necessario (Secao 7: evita refresh duplicado).
+        credentials = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+        if not credentials.expired:
+            return credentials
+        _record_refresh_health(token_path, last_refresh_attempted_at=datetime.now(UTC).isoformat())
+        try:
+            credentials.refresh(GoogleAuthRequest())
+        except RefreshError as exc:
+            _record_refresh_health(token_path, last_refresh_error=type(exc).__name__)
+            raise
+        _write_json_atomic(token_path, json.loads(credentials.to_json()))
+        _record_refresh_health(token_path, last_successful_refresh_at=datetime.now(UTC).isoformat(),
+                               last_refresh_error=None)
+    return credentials
 
 
 def connection_status(token_path: Path) -> dict:
