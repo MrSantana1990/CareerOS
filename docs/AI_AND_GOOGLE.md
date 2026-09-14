@@ -53,6 +53,14 @@ Variáveis de ambiente do serviço `web` (sem valores reais aqui - configure via
 
 Sem essas variáveis definidas, o botão "Continuar com Google" responde 503 e o login por e-mail/senha continua disponível normalmente.
 
+### Allowlist de e-mails (obrigatória, serviço `api`)
+
+Sem isolamento por usuário no painel ainda (Seção 12), qualquer conta Google com e-mail verificado que completasse o login ganharia acesso ao mesmo painel/dados compartilhados. Por isso a rota `POST /auth/google` (Core) exige uma allowlist explícita — **fail-closed**: sem ela (ou vazia), nenhum login com Google é aceito, nunca o oposto.
+
+| Variável | Serviço | Obrigatória | Descrição |
+| --- | --- | --- | --- |
+| `GOOGLE_LOGIN_ALLOWED_EMAILS` | `api` | Sim, para o login com Google funcionar | Lista de e-mails separados por vírgula autorizados a entrar (comparação sem diferenciar maiúsculas/minúsculas). Verificada em **todo** login, não só na criação do usuário — remover um e-mail da lista bloqueia o acesso mesmo de uma conta já vinculada. |
+
 ## Gmail
 
 O monitor consulta uma janela geral de 90 dias e uma busca específica de questionários de até 180 dias. Mensagens são classificadas como entrevista, questionário, proposta, rejeição, confirmação ou contato de recrutador. Resultados são deduplicados.

@@ -94,3 +94,28 @@ def test_route_never_logs_or_returns_any_secret_field():
     body = _route_body()
     for forbidden in ("id_token", "access_token", "client_secret", "refresh_token"):
         assert forbidden not in body
+
+
+# Allowlist (fail-closed) - achado real: sem isto, qualquer conta Google
+# verificada ganhava acesso automatico ao mesmo painel compartilhado ------
+
+def test_allowlist_is_enforced_before_any_user_lookup_or_creation():
+    body = _route_body()
+    assert "get_settings().google_login_allowlist" in body
+    assert "raise HTTPException(status_code=403" in body
+    guard_index = body.index("google_login_allowlist")
+    first_query_index = body.index("SELECT", guard_index)
+    insert_index = body.index("INSERT INTO users")
+    assert guard_index < first_query_index < insert_index
+
+
+def test_allowlist_check_runs_after_the_email_verified_guard():
+    body = _route_body()
+    verified_guard_index = body.index("if not payload.email_verified:")
+    allowlist_guard_index = body.index("google_login_allowlist")
+    assert verified_guard_index < allowlist_guard_index
+
+
+def test_allowlist_comparison_is_case_insensitive_and_trimmed():
+    body = _route_body()
+    assert "payload.email.strip().lower() not in get_settings().google_login_allowlist" in body

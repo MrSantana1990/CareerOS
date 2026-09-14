@@ -55,6 +55,10 @@ services:
       AUTO_CALENDAR_ENABLED: "false"
       PUSH_NOTIFICATIONS_ENABLED: "false"
       RESUME_STORAGE_DIR: "/data/resumes"
+      # Google Sign-In - allowlist obrigatoria (fail-closed): sem esta
+      # variavel (ou vazia), NENHUM login com Google e aceito - nunca
+      # o oposto. Configurar na VPS com os e-mails reais autorizados.
+      GOOGLE_LOGIN_ALLOWED_EMAILS: "${GOOGLE_LOGIN_ALLOWED_EMAILS:-}"
     volumes:
       - resume_data:/data/resumes
     depends_on:
