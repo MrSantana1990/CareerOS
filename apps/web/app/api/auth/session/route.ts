@@ -1,7 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { SESSION_COOKIE, validSession } from "../../../../lib/portal-auth";
+import { readSession, SESSION_COOKIE } from "../../../../lib/portal-auth";
 
 export async function GET(request: NextRequest) {
-  const valid = await validSession(request.cookies.get(SESSION_COOKIE)?.value, process.env.PORTAL_SESSION_SECRET ?? "");
-  return NextResponse.json({ authenticated: valid }, { status: valid ? 200 : 401 });
+  const session = await readSession(request.cookies.get(SESSION_COOKIE)?.value, process.env.PORTAL_SESSION_SECRET ?? "");
+  if (!session) return NextResponse.json({ authenticated: false }, { status: 401 });
+  // authProvider aqui é só COMO a sessão do CareerOS nasceu (senha vs.
+  // Google Sign-In) - nunca o status da integração de Gmail, que é
+  // consultado separadamente (Secao 14: Google Account != Gmail).
+  return NextResponse.json({
+    authenticated: true,
+    email: session.email,
+    authProvider: session.authProvider,
+    displayName: session.displayName ?? null,
+    avatarUrl: session.avatarUrl ?? null,
+  });
 }

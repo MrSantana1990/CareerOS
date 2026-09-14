@@ -1851,6 +1851,85 @@ async def save_profile(payload: ProfileInput, slug: str = Depends(require_admin)
     return await get_profile(slug)
 
 
+class GoogleIdentityInput(BaseModel):
+    """GOOGLE LOGIN != GMAIL INTEGRATION - isto so persiste a identidade JA
+    validada (assinatura/issuer/audience/nonce ja conferidos pelo apps/web
+    antes de chamar esta rota); nunca recebe nem guarda id_token/access_token
+    do Google. provider_subject (o `sub` do Google) e o identificador
+    canonico - nunca o email, que pode mudar (Secao 4)."""
+
+    provider_subject: str = Field(min_length=5, max_length=255)
+    email: str = Field(min_length=3, max_length=254)
+    email_verified: bool = False
+    display_name: str = Field(default="", max_length=160)
+    avatar_url: str | None = Field(default=None, max_length=500)
+
+
+@router.post("/auth/google")
+async def upsert_google_identity(payload: GoogleIdentityInput,
+                                 slug: str = Depends(require_admin)) -> dict[str, Any]:
+    """Upsert da identidade Google na tabela `users` JA EXISTENTE (nunca uma
+    tabela paralela). Precedencia: (1) mesmo provider_subject ja vinculado
+    -> so atualiza; (2) e-mail verificado bate com um usuario existente
+    ainda SEM nenhum provider vinculado -> linking seguro (Secao 5 - nunca
+    rouba um vinculo ja existente de outro provider); (3) nenhum match ->
+    cria um usuario novo na MESMA organizacao (Secao 12 - preparado para
+    multiuser, sem multi-tenant completo agora)."""
+    if not payload.email_verified:
+        raise HTTPException(status_code=422, detail="E-mail do Google não verificado.")
+    org_id = await organization_id(slug)
+    async with SessionLocal() as session:
+        existing_by_subject = await session.scalar(text("""
+            SELECT id FROM users
+            WHERE organization_id=:organization_id AND auth_provider='GOOGLE'
+              AND provider_subject=:provider_subject AND deleted_at IS NULL
+        """), {"organization_id": org_id, "provider_subject": payload.provider_subject})
+        if existing_by_subject:
+            row = (await session.execute(text("""
+                UPDATE users SET full_name=COALESCE(NULLIF(:full_name, ''), full_name),
+                  avatar_url=COALESCE(:avatar_url, avatar_url), email_verified=true,
+                  last_login_at=now(), updated_at=now()
+                WHERE id=:id
+                RETURNING id, organization_id, email, full_name, avatar_url, role
+            """), {"id": existing_by_subject, "full_name": payload.display_name,
+                   "avatar_url": payload.avatar_url})).mappings().one()
+            await session.commit()
+            return dict(row)
+
+        linkable = await session.scalar(text("""
+            SELECT id FROM users
+            WHERE organization_id=:organization_id AND lower(email)=lower(:email)
+              AND provider_subject IS NULL AND deleted_at IS NULL
+        """), {"organization_id": org_id, "email": payload.email})
+        if linkable:
+            row = (await session.execute(text("""
+                UPDATE users SET auth_provider='GOOGLE', provider_subject=:provider_subject,
+                  email_verified=true, full_name=COALESCE(NULLIF(:full_name, ''), full_name),
+                  avatar_url=COALESCE(:avatar_url, avatar_url), last_login_at=now(), updated_at=now()
+                WHERE id=:id
+                RETURNING id, organization_id, email, full_name, avatar_url, role
+            """), {"id": linkable, "provider_subject": payload.provider_subject,
+                   "full_name": payload.display_name, "avatar_url": payload.avatar_url})).mappings().one()
+            await session.commit()
+            return dict(row)
+
+        is_first_user = not await session.scalar(text(
+            "SELECT 1 FROM users WHERE organization_id=:organization_id AND deleted_at IS NULL LIMIT 1"
+        ), {"organization_id": org_id})
+        row = (await session.execute(text("""
+            INSERT INTO users (id, organization_id, email, full_name, role, status,
+              auth_provider, provider_subject, email_verified, avatar_url, last_login_at)
+            VALUES (gen_random_uuid(), :organization_id, :email, :full_name, :role, 'ACTIVE',
+              'GOOGLE', :provider_subject, true, :avatar_url, now())
+            RETURNING id, organization_id, email, full_name, avatar_url, role
+        """), {"organization_id": org_id, "email": payload.email,
+               "full_name": payload.display_name or payload.email,
+               "role": "OWNER" if is_first_user else "MEMBER",
+               "provider_subject": payload.provider_subject, "avatar_url": payload.avatar_url})).mappings().one()
+        await session.commit()
+    return dict(row)
+
+
 @router.post("/profile/resume")
 async def upload_resume(
     file: UploadFile = File(...),
