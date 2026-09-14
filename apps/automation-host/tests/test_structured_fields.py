@@ -90,6 +90,31 @@ def test_work_model_unknown_never_inferred_from_absence() -> None:
     assert result["confidence"] == 0
 
 
+def test_work_model_ignores_linkedin_ui_noise_before_sobre_a_vaga() -> None:
+    # Achado real (Evidence Resolution Sprint, vaga AllEasy): o dump de
+    # pagina do LinkedIn trazia ruido de "buscas recentes" com os 3 termos
+    # concatenados ("Presencialou Remotoou Hibrido") ANTES do conteudo real
+    # da vaga - o extrator antigo pegava "Hibrido" desse ruido, quando a
+    # vaga real era 100% remota ("Local: Home office." apos "Sobre a vaga").
+    text = (
+        "Analista de dados Presencialou Remotoou Híbrido\n\nVagas\n\n"
+        "AllEasy\n\nEngenheiro de Dados Junior\n\nBrasil · há 1 dia\n\nRemoto\n\n"
+        "Sobre a vaga\n\nFormação: Graduação em Ciência de Dados.\n\n"
+        "Imprescindível: Inglês avançado/Fluente.\n\nLocal: Home office.\n\n"
+        "Contrato PJ a longo prazo."
+    )
+    result = extract_work_model(text)
+    assert result["value"]["work_model"] == "REMOTE"
+    assert "Home office" in result["evidence_snippet"]
+
+
+def test_work_model_falls_back_to_whole_text_without_sobre_a_vaga_marker() -> None:
+    # Fontes sem o marcador (Catho/InfoJobs/textos em ingles) mantem o
+    # comportamento original - busca no texto inteiro.
+    result = extract_work_model("100% remoto, sem necessidade de deslocamento.")
+    assert result["value"]["work_model"] == "REMOTE"
+
+
 def test_location_extraction_campinas() -> None:
     result = extract_location("Vaga presencial em Campinas, região metropolitana.")
     assert result["value"]["region"] == "Campinas"
