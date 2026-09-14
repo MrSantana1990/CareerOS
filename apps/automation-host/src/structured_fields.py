@@ -60,6 +60,22 @@ _ONSITE = re.compile(r"presencial|on.?site|in.?office", re.IGNORECASE)
 _HYBRID_FREQUENCY = re.compile(
     r"(\d+)\s*(?:dias?|days?)\s*(?:por|per|/|a)\s*(?:semana|week)", re.IGNORECASE,
 )
+# Achado real (Evidence Resolution Sprint): paginas do LinkedIn trazem, ANTES
+# do conteudo real da vaga, ruido volatil de UI (sugestoes de busca
+# recentes/navegacao) que pode mencionar os 3 termos concatenados (ex.:
+# "Presencialou Remotoou Hibrido" - mesma classe de contaminacao ja
+# documentada em job_identity.py para o fingerprint). Quando o marcador
+# "Sobre a vaga" existe (presente de forma consistente em paginas do
+# LinkedIn em portugues, marcando o inicio da descricao real), a extracao
+# busca so a partir dele - nunca no ruido anterior. Ausencia do marcador
+# (Catho/InfoJobs/paginas em ingles) mantem o comportamento original
+# (busca no texto inteiro).
+_JOB_DESCRIPTION_ANCHOR = re.compile(r"sobre\s+a\s+vaga", re.IGNORECASE)
+
+
+def _job_description_text(text: str) -> str:
+    match = _JOB_DESCRIPTION_ANCHOR.search(text)
+    return text[match.end():] if match else text
 
 _REGION_PATTERNS = {
     "Campinas": re.compile(r"campinas|hortol[aâ]ndia|sumar[eé]|valinhos|vinhedo|paul[ií]nia|indaiatuba", re.IGNORECASE),
@@ -138,24 +154,25 @@ def extract_language_requirements(text: str) -> dict | None:
 
 
 def extract_work_model(text: str) -> dict:
-    if _HYBRID.search(text):
-        match = _HYBRID.search(text)
+    scoped_text = _job_description_text(text)
+    if _HYBRID.search(scoped_text):
+        match = _HYBRID.search(scoped_text)
         value: dict[str, object] = {"work_model": "HYBRID"}
-        frequency = _HYBRID_FREQUENCY.search(text)
+        frequency = _HYBRID_FREQUENCY.search(scoped_text)
         if frequency:
             value["frequency_days_per_week"] = int(frequency.group(1))
         return {"value": value, "confidence": 85,
-                "evidence_snippet": _snippet(text, match.start(), match.end()),
+                "evidence_snippet": _snippet(scoped_text, match.start(), match.end()),
                 "extraction_method": "keyword_regex"}
-    if _REMOTE.search(text):
-        match = _REMOTE.search(text)
+    if _REMOTE.search(scoped_text):
+        match = _REMOTE.search(scoped_text)
         return {"value": {"work_model": "REMOTE"}, "confidence": 80,
-                "evidence_snippet": _snippet(text, match.start(), match.end()),
+                "evidence_snippet": _snippet(scoped_text, match.start(), match.end()),
                 "extraction_method": "keyword_regex"}
-    if _ONSITE.search(text):
-        match = _ONSITE.search(text)
+    if _ONSITE.search(scoped_text):
+        match = _ONSITE.search(scoped_text)
         return {"value": {"work_model": "ONSITE"}, "confidence": 70,
-                "evidence_snippet": _snippet(text, match.start(), match.end()),
+                "evidence_snippet": _snippet(scoped_text, match.start(), match.end()),
                 "extraction_method": "keyword_regex"}
     # Nunca inferir remote pela ausencia de endereco (secao 20) - UNKNOWN
     # explicito, sem confidence/snippet (nao ha evidencia nenhuma).
