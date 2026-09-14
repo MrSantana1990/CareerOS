@@ -145,6 +145,13 @@ services:
       PORTAL_LOGIN_EMAIL: "${PORTAL_LOGIN_EMAIL:?Defina PORTAL_LOGIN_EMAIL}"
       PORTAL_PASSWORD_HASH: "${PORTAL_PASSWORD_HASH:?Defina PORTAL_PASSWORD_HASH}"
       PORTAL_SESSION_SECRET: "${PORTAL_SESSION_SECRET:?Defina PORTAL_SESSION_SECRET}"
+      # Google Sign-In (login) - opcional: cliente OAuth SEPARADO do usado
+      # para Gmail/Calendar (google_career.py). Ausente/vazio = o botão
+      # "Continuar com Google" responde 503 e o login por senha continua
+      # funcionando normalmente (Secao 15 - login nunca depende do Gmail).
+      GOOGLE_LOGIN_CLIENT_ID: "${GOOGLE_LOGIN_CLIENT_ID:-}"
+      GOOGLE_LOGIN_CLIENT_SECRET: "${GOOGLE_LOGIN_CLIENT_SECRET:-}"
+      GOOGLE_LOGIN_REDIRECT_URI: "${GOOGLE_LOGIN_REDIRECT_URI:-https://carreira.helpsystempro.site/api/auth/google/callback}"
     ports:
       - "127.0.0.1:${CAREER_PORT:-8093}:3000"
     depends_on:

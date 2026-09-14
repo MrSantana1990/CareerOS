@@ -19,9 +19,37 @@ async function hmac(value: string, secret: string): Promise<string> {
   return base64Url(new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(value))));
 }
 
-export async function createSession(email: string, secret: string): Promise<string> {
-  const payload = base64Url(encoder.encode(JSON.stringify({ email, expiresAt: Date.now() + 8 * 60 * 60 * 1000 })));
-  return `${payload}.${await hmac(payload, secret)}`;
+export interface SessionPayload {
+  email: string;
+  expiresAt: number;
+  // GOOGLE LOGIN != GMAIL INTEGRATION: authProvider aqui descreve so COMO a
+  // sessao do CareerOS foi criada (senha do portal vs. Google Sign-In) -
+  // nunca tem qualquer relacao com o token/refresh_token do Gmail
+  // (google_career.py), que continua 100% separado.
+  authProvider: "PASSWORD" | "GOOGLE";
+  userId?: string;
+  displayName?: string;
+  avatarUrl?: string;
+}
+
+export interface SessionExtra {
+  authProvider?: "PASSWORD" | "GOOGLE";
+  userId?: string;
+  displayName?: string;
+  avatarUrl?: string;
+}
+
+export async function createSession(email: string, secret: string, extra?: SessionExtra): Promise<string> {
+  const payload: SessionPayload = {
+    email,
+    expiresAt: Date.now() + 8 * 60 * 60 * 1000,
+    authProvider: extra?.authProvider ?? "PASSWORD",
+    ...(extra?.userId ? { userId: extra.userId } : {}),
+    ...(extra?.displayName ? { displayName: extra.displayName } : {}),
+    ...(extra?.avatarUrl ? { avatarUrl: extra.avatarUrl } : {}),
+  };
+  const encoded = base64Url(encoder.encode(JSON.stringify(payload)));
+  return `${encoded}.${await hmac(encoded, secret)}`;
 }
 
 export async function recoveryCode(email: string, secret: string, bucket = Math.floor(Date.now() / 300_000)): Promise<string> {
@@ -36,16 +64,22 @@ export async function verifyRecoveryCode(email: string, code: string, secret: st
     || normalized === await recoveryCode(email, secret, bucket - 1);
 }
 
-export async function validSession(value: string | undefined, secret: string): Promise<boolean> {
-  if (!value || !secret) return false;
+export async function readSession(value: string | undefined, secret: string): Promise<SessionPayload | null> {
+  if (!value || !secret) return null;
   const [payload, signature, extra] = value.split(".");
-  if (!payload || !signature || extra || signature !== await hmac(payload, secret)) return false;
+  if (!payload || !signature || extra || signature !== await hmac(payload, secret)) return null;
   try {
-    const data = JSON.parse(new TextDecoder().decode(decodeBase64Url(payload))) as { expiresAt?: number };
-    return typeof data.expiresAt === "number" && data.expiresAt > Date.now();
+    const data = JSON.parse(new TextDecoder().decode(decodeBase64Url(payload))) as Partial<SessionPayload>;
+    if (typeof data.expiresAt !== "number" || data.expiresAt <= Date.now()) return null;
+    if (typeof data.email !== "string") return null;
+    return { ...data, email: data.email, expiresAt: data.expiresAt, authProvider: data.authProvider ?? "PASSWORD" };
   } catch {
-    return false;
+    return null;
   }
+}
+
+export async function validSession(value: string | undefined, secret: string): Promise<boolean> {
+  return (await readSession(value, secret)) !== null;
 }
 
 export async function verifyPassword(password: string, encodedHash: string): Promise<boolean> {

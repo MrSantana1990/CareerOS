@@ -198,6 +198,38 @@
   opacity: 0.6;
   cursor: wait;
 }
+.google-signin-button {
+  min-height: 52px;
+  width: 100%;
+  border: 1px solid #dadce0;
+  border-radius: 12px;
+  color: #1f1f1f;
+  background: #ffffff;
+  font-weight: 600;
+  font-size: 15px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.google-signin-button:hover {
+  background: #f7f7f7;
+}
+.google-signin-button::before {
+  content: "";
+  width: 18px;
+  height: 18px;
+  background-image: url("data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2048%2048%27%3E%3Cpath%20fill%3D%27%234285F4%27%20d%3D%27M45.12%2024.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51%202.75-2.06%205.08-4.39%206.64v5.52h7.11c4.16-3.83%206.56-9.47%206.56-16.17z%27%2F%3E%3Cpath%20fill%3D%27%2334A853%27%20d%3D%27M24%2046c5.94%200%2010.92-1.97%2014.56-5.33l-7.11-5.52c-1.97%201.32-4.49%202.1-7.45%202.1-5.73%200-10.58-3.87-12.31-9.07H4.34v5.7C7.96%2041.07%2015.4%2046%2024%2046z%27%2F%3E%3Cpath%20fill%3D%27%23FBBC05%27%20d%3D%27M11.69%2028.18c-.44-1.32-.69-2.73-.69-4.18s.25-2.86.69-4.18v-5.7H4.34C2.85%2017.09%202%2020.45%202%2024s.85%206.91%202.34%209.88l7.35-5.7z%27%2F%3E%3Cpath%20fill%3D%27%23EA4335%27%20d%3D%27M24%2010.75c3.23%200%206.13%201.11%208.41%203.29l6.31-6.31C34.91%204.18%2029.93%202%2024%202%2015.4%202%207.96%206.93%204.34%2014.12l7.35%205.7c1.73-5.2%206.58-9.07%2012.31-9.07z%27%2F%3E%3C%2Fsvg%3E");
+  background-size: contain;
+  background-repeat: no-repeat;
+}
+.login-divider {
+  margin: 4px 0;
+  text-align: center;
+  color: #7890a3;
+  font-size: 13px;
+}
 .password-field {
   position: relative;
 }
