@@ -2705,7 +2705,16 @@ async def create_intervention(payload: InterventionInput,
 
 @router.get("/interventions")
 async def list_interventions(status: str = Query(default="PENDING"),
+                             dedup_key: str | None = Query(default=None, max_length=200),
                              slug: str = Depends(require_admin)) -> list[dict[str, Any]]:
+    """dedup_key e um filtro exato opcional por
+    evidence->>'deduplication_key' - existe porque a listagem normal e
+    limitada a 100 linhas (mais recentes primeiro) e uma intervencao
+    antiga e conhecida (ex.: a de reautorizacao do Gmail) pode ficar
+    enterrada atras de mais de 100 outras mais novas, tornando-a
+    impossivel de localizar so pela paginacao padrao (achado real,
+    Recuperacao operacional do Gmail: _resolve_gmail_reauth_intervention
+    nunca encontraria a intervencao certa sem isto)."""
     org_id = await organization_id(slug)
     async with SessionLocal() as session:
         rows = (await session.execute(text("""
@@ -2713,8 +2722,9 @@ async def list_interventions(status: str = Query(default="PENDING"),
                    instructions, page_url, evidence, created_at, resolved_at, resolution
             FROM human_interventions
             WHERE organization_id=:organization_id AND (:status='ALL' OR status=:status)
+              AND (:dedup_key IS NULL OR evidence->>'deduplication_key' = :dedup_key)
             ORDER BY CASE status WHEN 'PENDING' THEN 1 ELSE 2 END, created_at DESC LIMIT 100
-        """), {"organization_id": org_id, "status": status})).mappings()
+        """), {"organization_id": org_id, "status": status, "dedup_key": dedup_key})).mappings()
     return [dict(row) for row in rows]
 
 
